@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y \
 # 2. EVerest 소스 클론
 RUN git clone https://github.com/EVerest/everest-core.git \
     && cd everest-core \
-    && git checkout 9f775a97 \
+    && git checkout b666184e \
     && git submodule update --init --recursive
 
 # 3. A1 공격 패치 적용
