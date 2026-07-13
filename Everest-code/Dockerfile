@@ -28,8 +28,8 @@ RUN git clone https://github.com/EVerest/everest-core.git \
     && git submodule update --init --recursive
 
 # 3. A1 공격 패치 적용
-COPY patches/iso_server.patch /tmp/
-RUN cd everest-core && git apply --ignore-whitespace --whitespace=nowarn /tmp/iso_server.patch
+COPY patches/A1_evsev2g_current-spoofing.patch /tmp/
+RUN cd everest-core && git apply --ignore-whitespace --whitespace=nowarn /tmp/A1_evsev2g_current-spoofing.patch
 
 # 4. DC+OCPP2.0.1 설정 파일 추가
 COPY config/config-sil-dc-ocpp201.yaml everest-core/config/

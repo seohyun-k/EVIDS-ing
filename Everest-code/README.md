@@ -24,9 +24,10 @@ EVIDS_A1/
 
 | 항목 | 내용 |
 |---|---|
-| 공격 대상 | EVerest `EvseV2G` 모듈 (`iso_server.cpp`) |
+| 공격 대상 | EVerest `EvseV2G` 모듈 (`iso_server.cpp`, `din_server.cpp`) |
 | 수정 지점 1 | `ChargeParameterDiscoveryRes` — EVSEMaximumCurrentLimit = 250A로 거짓 협상 |
 | 수정 지점 2 | `CurrentDemandRes` — EVSEPresentCurrent *= 8 (8배 부풀림) |
+| DIN 70121(구형 EV) 대응 | `din_server.cpp` `handle_din_charge_parameter`, `handle_din_current_demand` 동일 로직 |
 | 탐지 근거 | ISO 15118 보고값(160A) vs OCPP MeterValues(20A) 불일치 → RV04 규칙 위반 |
 
 ---
