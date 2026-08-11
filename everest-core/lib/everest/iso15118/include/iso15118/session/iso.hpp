@@ -7,11 +7,11 @@
 
 #include <iso15118/config.hpp>
 
+#include <everest/util/fsm/fsm.hpp>
 #include <iso15118/d20/config.hpp>
 #include <iso15118/d20/context.hpp>
 #include <iso15118/d20/control_event_queue.hpp>
 #include <iso15118/d20/states.hpp>
-#include <iso15118/fsm/fsm.hpp>
 
 #include <iso15118/io/connection_abstract.hpp>
 #include <iso15118/io/poll_manager.hpp>
@@ -19,7 +19,6 @@
 #include <iso15118/io/time.hpp>
 
 #include <iso15118/session/feedback.hpp>
-#include <iso15118/session/logger.hpp>
 
 #include <iso15118/d20/timeout.hpp>
 
@@ -35,20 +34,23 @@ class Session {
 public:
     Session(std::unique_ptr<io::IConnection>, d20::SessionConfig, const session::feedback::Callbacks&,
             std::optional<d20::PauseContext>&);
+    Session(std::unique_ptr<io::IConnection>, d20::SessionConfig, const session::feedback::Callbacks&,
+            std::optional<d20::PauseContext>&, bool skip_app_protocol_negotiation);
     ~Session();
 
     TimePoint const& poll();
     void push_control_event(const d20::ControlEvent&);
 
     bool is_finished() const {
-        return (ctx.session_stopped or ctx.session_paused);
+        return (ctx.session_stopped or ctx.session_paused) and not message_exchange.has_response();
     }
 
     void close();
 
+    void request_shutdown();
+
 private:
     std::unique_ptr<io::IConnection> connection;
-    session::SessionLogger log;
 
     SessionState state;
     // input buffer
@@ -73,6 +75,9 @@ private:
     d20::Timeouts timeouts;
 
     void handle_connection_event(io::ConnectionEvent event);
+    void send_response();
+    std::optional<TimePoint> last_response_tx_time; // timestamp of the last response message sent
+    std::optional<TimePoint> response_send_after;   // time point when the next response message can be sent
 };
 
 } // namespace iso15118

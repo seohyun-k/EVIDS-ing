@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <math.h>
+#include <optional>
 #include <string.h>
 
 namespace module {
@@ -71,15 +72,18 @@ const std::string cpevent_to_string(CPEvent e) {
     throw std::out_of_range("No known string conversion for provided enum of type CPEvent");
 }
 
-IECStateMachine::IECStateMachine(const std::unique_ptr<evse_board_supportIntf>& r_bsp_,
-                                 bool lock_connector_in_state_b_) :
-    r_bsp(r_bsp_), lock_connector_in_state_b(lock_connector_in_state_b_) {
+IECStateMachine::IECStateMachine(const std::unique_ptr<evse_board_supportIntf>& r_bsp_, bool lock_connector_in_state_b_,
+                                 bool use_authorized_) :
+    r_bsp(r_bsp_),
+    lock_connector_in_state_b(lock_connector_in_state_b_),
+    use_authorized(use_authorized_),
+    authorized(!use_authorized_) {
     // feed the state machine whenever the timer expires
     timeout_state_c1.signal_reached.connect([this]() { feed_state_machine(std::nullopt); });
     timeout_unlock_state_F.signal_reached.connect([this]() { feed_state_machine(std::nullopt); });
 
     // Subscribe to bsp driver to receive BspEvents from the hardware
-    r_bsp->subscribe_event([this](const types::board_support_common::BspEvent event) {
+    r_bsp->subscribe_event([this](types::board_support_common::BspEvent const& event) {
         if (enabled) {
             // feed into state machine
             process_bsp_event(event);
@@ -89,7 +93,7 @@ IECStateMachine::IECStateMachine(const std::unique_ptr<evse_board_supportIntf>& 
     });
 }
 
-void IECStateMachine::process_bsp_event(const types::board_support_common::BspEvent bsp_event) {
+void IECStateMachine::process_bsp_event(types::board_support_common::BspEvent const& bsp_event) {
     auto event = from_bsp_event(bsp_event.event);
     std::visit(overloaded{[this](const RawCPState& raw_state) {
                               // If it is a raw CP state, run it through the state machine
@@ -110,7 +114,7 @@ void IECStateMachine::process_bsp_event(const types::board_support_common::BspEv
                event);
 }
 
-void IECStateMachine::feed_state_machine(std::optional<RawCPState> cp_state_opt) {
+void IECStateMachine::feed_state_machine(std::optional<RawCPState> const& cp_state_opt) {
     auto events = state_machine(cp_state_opt);
 
     // Process all events
@@ -125,7 +129,7 @@ void IECStateMachine::feed_state_machine(std::optional<RawCPState> cp_state_opt)
 // - CP state changes (both events from hardware as well as duty cycle changes)
 // - Allow power on changes
 // - The C1 6s timer expires
-std::queue<CPEvent> IECStateMachine::state_machine(std::optional<RawCPState> cp_state_opt) {
+std::queue<CPEvent> IECStateMachine::state_machine(std::optional<RawCPState> const& cp_state_opt) {
 
     if (cp_state_opt) {
         EVLOG_debug << "RawCPState " << static_cast<int>(cp_state_opt.value());
@@ -421,7 +425,7 @@ void IECStateMachine::call_allow_power_on_bsp(bool value) {
     r_bsp->call_allow_power_on({value, power_on_reason});
 }
 
-void IECStateMachine::set_pp_ampacity(types::board_support_common::ProximityPilot pp) {
+void IECStateMachine::set_pp_ampacity(types::board_support_common::ProximityPilot const& pp) {
     switch (pp.ampacity) {
     case types::board_support_common::Ampacity::A_13:
         pp_ampacity = 13.;
@@ -447,8 +451,12 @@ void IECStateMachine::set_pp_ampacity(types::board_support_common::ProximityPilo
 // High level state machine requests reading PP ampacity value.
 // The high level state machine will never call this if it is not used
 // (e.g. in DC or AC tethered charging)
-double IECStateMachine::read_pp_ampacity() {
-    return pp_ampacity;
+std::optional<double> IECStateMachine::read_pp_ampacity() {
+    const double tmp = pp_ampacity;
+    if (tmp == 0.0) {
+        return std::nullopt;
+    }
+    return tmp;
 }
 
 // Forward special request to switch the number of phases during charging. BSP will need to implement a special
@@ -509,7 +517,8 @@ void IECStateMachine::connector_force_unlock() {
 }
 
 void IECStateMachine::check_connector_lock() {
-    bool should_be_locked_considering_relais_and_force = relais_on or (should_be_locked and not force_unlocked);
+    bool should_be_locked_considering_relais_and_force =
+        relais_on or (should_be_locked and not force_unlocked and authorized);
 
     if (not is_locked and should_be_locked_considering_relais_and_force) {
         signal_lock();
@@ -518,6 +527,15 @@ void IECStateMachine::check_connector_lock() {
         signal_unlock();
         is_locked = false;
     }
+}
+
+void IECStateMachine::set_authorized(bool a) {
+    EVLOG_debug << "set_authorized - " << a;
+    if (!use_authorized) {
+        return;
+    }
+    authorized = a;
+    feed_state_machine(std::nullopt);
 }
 
 } // namespace module

@@ -448,7 +448,7 @@ at the end of the installation).
 
 Once they are sourced, this terminal will cross compile.
 
-In everest-core, create a folder called "build-cross". Change into it.
+In ``EVerest/``, create a folder called "build-cross". Change into it.
 
 There, run cmake as follows:
 
@@ -494,7 +494,7 @@ Then you can run your self-compiled version like this:
 
 .. code-block:: bash
 
-  /var/everest/bin/manager --conf /path/to/my/configfile
+  /var/everest/bin/manager --config /path/to/my/configfile
 
 .. _belaybox_yeti_flash:
 

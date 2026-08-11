@@ -7,12 +7,12 @@
 
 #include <websocketpp_utils/uri.hpp>
 
-#include <conversions.hpp>
-#include <device_model/composed_device_model_storage.hpp>
-#include <error_handling.hpp>
 #include <everest/conversions/ocpp/evse_security_ocpp.hpp>
 #include <everest/conversions/ocpp/ocpp_conversions.hpp>
 #include <everest/external_energy_limits/external_energy_limits.hpp>
+#include <everest/ocpp_module_common/conversions.hpp>
+#include <everest/ocpp_module_common/device_model/composed_device_model_storage.hpp>
+#include <everest/ocpp_module_common/error_handling.hpp>
 #include <ocpp/v2/utils.hpp>
 
 namespace {
@@ -35,6 +35,20 @@ void update_evcc_id_token(ocpp::v2::IdToken& id_token, const std::string& evcc_i
         info_vector.push_back(info);
         id_token.additionalInfo = info_vector;
     }
+}
+
+std::string ocpp_protocol_version_to_string(const ocpp::OcppProtocolVersion ocpp_protocol_version) {
+    switch (ocpp_protocol_version) {
+    case ocpp::OcppProtocolVersion::v16:
+        return "1.6";
+    case ocpp::OcppProtocolVersion::v201:
+        return "2.0.1";
+    case ocpp::OcppProtocolVersion::v21:
+        return "2.1";
+    case ocpp::OcppProtocolVersion::Unknown:
+        return "Unknown";
+    }
+    return "Unknown";
 }
 } // namespace
 
@@ -384,13 +398,17 @@ void OCPP201::init() {
 
     this->init_evse_maps();
 
+    this->mrec_error_map = this->config.CustomMrecErrorMapPath.empty()
+                               ? MREC_ERROR_MAP
+                               : load_mrec_error_map_overrides(this->config.CustomMrecErrorMapPath);
+
     const auto error_handler = [this](const Everest::error::Error& error) {
         if (error.type == EVSE_MANAGER_INOPERATIVE_ERROR) {
             // handled by specific evse_manager error handler
             return;
         }
         if (this->started) {
-            const auto event_data = get_event_data(error, false, this->event_id_counter++);
+            const auto event_data = get_event_data(error, false, this->event_id_counter++, this->mrec_error_map);
             this->charge_point->on_event({event_data});
         } else {
             std::scoped_lock lock(this->session_event_mutex);
@@ -404,7 +422,7 @@ void OCPP201::init() {
             return;
         }
         if (this->started) {
-            const auto event_data = get_event_data(error, true, this->event_id_counter++);
+            const auto event_data = get_event_data(error, true, this->event_id_counter++, this->mrec_error_map);
             this->charge_point->on_event({event_data});
         } else {
             std::scoped_lock lock(this->session_event_mutex);
@@ -416,8 +434,12 @@ void OCPP201::init() {
 
     r_system->subscribe_firmware_update_status([this](const types::system::FirmwareUpdateStatus status) {
         if (this->started) {
+            auto disable_connectors_during_install =
+                !status.firmware_update_metadata.has_value() ||
+                status.firmware_update_metadata.value().disable_connectors_during_install.value_or(true);
             this->charge_point->on_firmware_update_status_notification(
-                status.request_id, conversions::to_ocpp_firmware_status_enum(status.firmware_update_status));
+                status.request_id, conversions::to_ocpp_firmware_status_enum(status.firmware_update_status),
+                disable_connectors_during_install);
         } else {
             std::scoped_lock lock(this->session_event_mutex);
             this->event_queue[0].push(status);
@@ -718,9 +740,9 @@ void OCPP201::ready() {
 
     callbacks.configure_network_connection_profile_callback =
         [this](const int32_t configuration_slot, const ocpp::v2::NetworkConnectionProfile& network_connection_profile) {
-            std::promise<ocpp::v2::ConfigNetworkResult> promise;
-            std::future<ocpp::v2::ConfigNetworkResult> future = promise.get_future();
-            ocpp::v2::ConfigNetworkResult result;
+            std::promise<ocpp::ConfigNetworkResult> promise;
+            std::future<ocpp::ConfigNetworkResult> future = promise.get_future();
+            ocpp::ConfigNetworkResult result;
             result.success = true;
             promise.set_value(result);
             return future;
@@ -841,6 +863,11 @@ void OCPP201::ready() {
             const types::session_cost::TariffMessage m = ocpp_conversions::to_everest_tariff_message(message);
             this->p_session_cost->publish_tariff_message(m);
         };
+
+        callbacks.default_price_callback = [this](const std::vector<ocpp::DisplayMessageContent>& messages) {
+            const types::session_cost::DefaultPrice p = ocpp_conversions::to_everest_default_price(messages);
+            this->p_session_cost->publish_default_price(p);
+        };
     }
 
     if (!this->r_data_transfer.empty()) {
@@ -878,16 +905,9 @@ void OCPP201::ready() {
         this->p_ocpp_generic->publish_security_event(event);
     };
 
-    const auto composite_schedule_unit = get_unit_or_default(this->config.RequestCompositeScheduleUnit);
-
     // this callback publishes the schedules within EVerest and applies the schedules for the individual
     // r_evse_energy_sink
-    const auto charging_schedules_callback = [this, composite_schedule_unit]() {
-        const auto composite_schedules = this->charge_point->get_all_composite_schedules(
-            this->config.RequestCompositeScheduleDurationS, composite_schedule_unit);
-        this->publish_charging_schedules(composite_schedules);
-        this->set_external_limits(composite_schedules);
-    };
+    const auto charging_schedules_callback = [this]() { charging_schedules_timer_callback(); };
 
     callbacks.set_charging_profiles_callback = charging_schedules_callback;
 
@@ -946,6 +966,30 @@ void OCPP201::ready() {
         return false;
     };
 
+    callbacks.ocpp_messages_callback = [this](const std::string& message, ocpp::MessageDirection direction) {
+        switch (direction) {
+        case ocpp::MessageDirection::CSMSToChargingStation: {
+            types::ocpp::Message ocpp_message;
+            ocpp_message.message = message;
+            ocpp_message.version = ocpp_protocol_version_to_string(this->ocpp_protocol_version);
+            ocpp_message.direction = types::ocpp::MessageDirection::CSMSToChargingStation;
+            p_ocpp_generic->publish_ocpp_message(ocpp_message);
+            break;
+        }
+        case ocpp::MessageDirection::ChargingStationToCSMS: {
+            types::ocpp::Message ocpp_message;
+            ocpp_message.message = message;
+            ocpp_message.version = ocpp_protocol_version_to_string(this->ocpp_protocol_version);
+            ocpp_message.direction = types::ocpp::MessageDirection::ChargingStationToCSMS;
+            p_ocpp_generic->publish_ocpp_message(ocpp_message);
+            break;
+        }
+        default:
+            // unknown message direction (ignored)
+            break;
+        }
+    };
+
     {
         auto ready_handle = this->evse_ready_map.handle();
         ready_handle.wait([this, &ready_handle]() {
@@ -968,10 +1012,12 @@ void OCPP201::ready() {
         device_model_database_path, device_model_database_migration_path, device_model_config_path);
 
     // initialize everest device model
+    // no DER components: this module does not implement der_active_directives_callback (DER is OCPPmulti-only)
     this->everest_device_model_storage = std::make_shared<device_model::EverestDeviceModelStorage>(
         r_evse_manager, r_extensions_15118, this->evse_hardware_capabilities_map,
         this->evse_supported_energy_transfer_modes, this->evse_service_renegotiation_supported,
-        everest_device_model_database_path, device_model_database_migration_path, get_config_service_client());
+        /*with_der_components=*/false, everest_device_model_database_path, device_model_database_migration_path,
+        get_config_service_client());
 
     // initialize composed device model, this will be provided to the ChargePoint constructor
     auto composed_device_model_storage = std::make_unique<module::device_model::ComposedDeviceModelStorage>();
@@ -987,11 +1033,7 @@ void OCPP201::ready() {
 
     // publish charging schedules at least once on startup
     charging_schedules_callback();
-
-    if (this->config.CompositeScheduleIntervalS > 0) {
-        this->charging_schedules_timer.interval(charging_schedules_callback,
-                                                std::chrono::seconds(this->config.CompositeScheduleIntervalS));
-    }
+    charging_schedules_timer_start();
 
     this->init_module_configuration();
 
@@ -1069,7 +1111,8 @@ void OCPP201::ready() {
                 const auto& error = std::get<Everest::error::Error>(queued_event);
                 EVLOG_info << "Processing queued error event for evse_id: " << evse_id << ": " << error.type;
                 bool is_active = error.state == Everest::error::State::Active;
-                const auto event_data = get_event_data(error, !is_active, this->event_id_counter++);
+                const auto event_data =
+                    get_event_data(error, !is_active, this->event_id_counter++, this->mrec_error_map);
                 this->charge_point->on_event({event_data});
 
                 // We do only report inoperative errors as faults
@@ -1087,9 +1130,13 @@ void OCPP201::ready() {
             } else if (std::holds_alternative<types::system::FirmwareUpdateStatus>(queued_event)) {
                 const auto fw_update_status = std::get<types::system::FirmwareUpdateStatus>(queued_event);
                 EVLOG_info << "Processing queued firmware update status";
+                auto disable_connectors_during_install =
+                    !fw_update_status.firmware_update_metadata.has_value() ||
+                    fw_update_status.firmware_update_metadata.value().disable_connectors_during_install.value_or(true);
                 this->charge_point->on_firmware_update_status_notification(
                     fw_update_status.request_id,
-                    conversions::to_ocpp_firmware_status_enum(fw_update_status.firmware_update_status));
+                    conversions::to_ocpp_firmware_status_enum(fw_update_status.firmware_update_status),
+                    disable_connectors_during_install);
             } else if (std::holds_alternative<types::system::LogStatus>(queued_event)) {
                 const auto log_status = std::get<types::system::LogStatus>(queued_event);
                 EVLOG_info << "Processing queued log status";
@@ -1101,6 +1148,50 @@ void OCPP201::ready() {
             evse_event_queue.pop();
         }
     }
+}
+
+void OCPP201::charging_schedules_timer_callback() {
+    // Single-flight + coalesce: the recompute body publishes schedules within EVerest and applies the
+    // external limits. It now fires concurrently from the interval timer, the libocpp message thread,
+    // and the K28 on_deadline/reaper callbacks, so serialize it here (the convergence point) — concurrent
+    // fires must not apply a stale composite over a fresh one, and a burst collapses into one recompute.
+    recompute_pending.store(true);
+    // Acquire / run / release / re-check: a fire whose store(true) lands after the holder's final
+    // exchange(false) but before it releases the mutex would fail try_lock and otherwise be dropped
+    // until the next trigger. Re-checking the flag after the lock is released runs that pending
+    // request instead of losing it.
+    while (recompute_pending.load()) {
+        if (!recompute_mutex.try_lock()) {
+            // Another thread holds the recompute; it will observe recompute_pending and run our update.
+            return;
+        }
+        {
+            try {
+                std::lock_guard<std::mutex> guard(recompute_mutex, std::adopt_lock);
+                while (recompute_pending.exchange(false)) {
+                    const auto composite_schedule_unit = get_unit_or_default(config.RequestCompositeScheduleUnit);
+                    const auto composite_schedules = charge_point->get_all_composite_schedules(
+                        config.RequestCompositeScheduleDurationS, composite_schedule_unit);
+                    publish_charging_schedules(composite_schedules);
+                    set_external_limits(composite_schedules);
+                }
+            } catch (const std::exception& error) {
+                EVLOG_warning << "Composite calculation failed, unable to send external_limits";
+            }
+        }
+    }
+}
+
+void OCPP201::charging_schedules_timer_start() {
+    if (config.CompositeScheduleIntervalS > 0) {
+        const auto charging_schedules_callback = [this]() { charging_schedules_timer_callback(); };
+        charging_schedules_timer.interval(charging_schedules_callback,
+                                          std::chrono::seconds(config.CompositeScheduleIntervalS));
+    }
+}
+
+void OCPP201::charging_schedules_timer_stop() {
+    charging_schedules_timer.stop();
 }
 
 void OCPP201::init_evse_subscriptions() {
@@ -1182,7 +1273,7 @@ void OCPP201::init_evse_subscriptions() {
 
         auto fault_handler = [this, evse_id](const Everest::error::Error& error) {
             if (this->started) {
-                const auto event_data = get_event_data(error, false, this->event_id_counter++);
+                const auto event_data = get_event_data(error, false, this->event_id_counter++, this->mrec_error_map);
                 this->charge_point->on_event({event_data});
                 this->charge_point->on_faulted(evse_id, get_connector_id_from_error(error));
             } else {
@@ -1193,7 +1284,7 @@ void OCPP201::init_evse_subscriptions() {
 
         auto fault_cleared_handler = [this, evse_id](const Everest::error::Error& error) {
             if (this->started) {
-                const auto event_data = get_event_data(error, true, this->event_id_counter++);
+                const auto event_data = get_event_data(error, true, this->event_id_counter++, this->mrec_error_map);
                 this->charge_point->on_event({event_data});
                 this->charge_point->on_fault_cleared(evse_id, get_connector_id_from_error(error));
             } else {
@@ -1380,10 +1471,16 @@ void OCPP201::process_tx_event_effect(const int32_t evse_id, const TxEventEffect
         transaction_data->meter_value = conversions::to_ocpp_meter_value(get_meter_value(session_event),
                                                                          ocpp::v2::ReadingContextEnum::Transaction_End,
                                                                          get_signed_meter_value(session_event));
+        std::optional<ocpp::v2::SignedMeterValue> start_signed_meter_value;
+        if (session_event.transaction_finished.has_value() &&
+            session_event.transaction_finished.value().start_signed_meter_value.has_value()) {
+            start_signed_meter_value = conversions::to_ocpp_signed_meter_value(
+                session_event.transaction_finished.value().start_signed_meter_value.value());
+        }
         this->charge_point->on_transaction_finished(evse_id, transaction_data->timestamp, transaction_data->meter_value,
                                                     transaction_data->stop_reason, transaction_data->trigger_reason,
                                                     transaction_data->id_token, std::nullopt,
-                                                    transaction_data->charging_state);
+                                                    transaction_data->charging_state, start_signed_meter_value);
         this->transaction_handler->reset_transaction_data(evse_id);
     }
 }
@@ -1680,12 +1777,12 @@ void OCPP201::process_reservation_end(const int32_t evse_id, const int32_t conne
     this->charge_point->on_reservation_cleared(evse_id, connector_id);
 }
 
-void OCPP201::publish_charging_schedules(const std::vector<ocpp::v2::CompositeSchedule>& composite_schedules) {
+void OCPP201::publish_charging_schedules(const std::vector<ocpp::v2::EnhancedCompositeSchedule>& composite_schedules) {
     const auto everest_schedules = conversions::to_everest_charging_schedules(composite_schedules);
     this->p_ocpp_generic->publish_charging_schedules(everest_schedules);
 }
 
-void OCPP201::set_external_limits(const std::vector<ocpp::v2::CompositeSchedule>& composite_schedules) {
+void OCPP201::set_external_limits(const std::vector<ocpp::v2::EnhancedCompositeSchedule>& composite_schedules) {
     const auto start_time = ocpp::DateTime();
 
     auto to_timestamp = [&](int seconds_offset) {
@@ -1702,7 +1799,7 @@ void OCPP201::set_external_limits(const std::vector<ocpp::v2::CompositeSchedule>
     }
 
     auto create_setpoint_entry =
-        [&](const std::string& timestamp, const ocpp::v2::ChargingSchedulePeriod& period,
+        [&](const std::string& timestamp, const ocpp::v2::EnhancedChargingSchedulePeriod& period,
             const ocpp::v2::ChargingRateUnitEnum& unit) -> std::optional<types::energy::ScheduleSetpointEntry> {
         const bool has_basic_setpoint = period.setpoint.has_value();
         const bool has_freq_table = period.v2xFreqWattCurve.has_value() && !period.v2xFreqWattCurve->empty();
@@ -1741,7 +1838,7 @@ void OCPP201::set_external_limits(const std::vector<ocpp::v2::CompositeSchedule>
     };
 
     auto create_limits_entry =
-        [&](const std::string& timestamp, const ocpp::v2::ChargingSchedulePeriod& period,
+        [&](const std::string& timestamp, const ocpp::v2::EnhancedChargingSchedulePeriod& period,
             const ocpp::v2::ChargingRateUnitEnum& unit) -> std::optional<types::energy::ScheduleReqEntry> {
         if (!period.limit.has_value()) {
             return std::nullopt;

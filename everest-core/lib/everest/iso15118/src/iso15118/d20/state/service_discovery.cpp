@@ -11,6 +11,8 @@
 #include <iso15118/detail/d20/state/service_discovery.hpp>
 #include <iso15118/detail/d20/state/session_stop.hpp>
 
+#include <everest/util/vector/fixed_vector.hpp>
+
 namespace {
 iso15118::message_20::datatypes::ServiceCategory
 convert_service_id_to_service_category(const std::uint16_t service_id) {
@@ -34,7 +36,9 @@ convert_service_id_to_service_category(const std::uint16_t service_id) {
     case 9:
         return iso15118::message_20::datatypes::ServiceCategory::MCS_BPT;
     case 10:
-        return iso15118::message_20::datatypes::ServiceCategory::AC_DER;
+        return iso15118::message_20::datatypes::ServiceCategory::AC_DER_IEC;
+    case 11:
+        return iso15118::message_20::datatypes::ServiceCategory::AC_DER_SAE;
     default:
         // returning ParkingStatus as default to show nonsense
         return iso15118::message_20::datatypes::ServiceCategory::ParkingStatus;
@@ -46,7 +50,8 @@ namespace iso15118::d20::state {
 
 namespace dt = message_20::datatypes;
 
-static bool find_service_id(const std::vector<uint16_t>& req_service_ids, const uint16_t service) {
+static bool find_service_id(const everest::lib::util::fixed_vector<uint16_t, 16>& req_service_ids,
+                            const uint16_t service) {
     return std::find(req_service_ids.begin(), req_service_ids.end(), service) != req_service_ids.end();
 }
 
@@ -108,7 +113,6 @@ handle_request(const message_20::ServiceDiscoveryRequest& req, d20::Session& ses
 
     if (not vas_services_list.empty()) {
         auto& vas_service_list = res.vas_list.emplace();
-        vas_service_list.reserve(vas_services_list.size());
         for (auto& conf_vas_service : vas_services_list) {
             auto& vas_service = vas_service_list.emplace_back();
             vas_service = conf_vas_service;
@@ -120,7 +124,7 @@ handle_request(const message_20::ServiceDiscoveryRequest& req, d20::Session& ses
 }
 
 void ServiceDiscovery::enter() {
-    m_ctx.log.enter_state("ServiceDiscovery");
+    logf_debug("Enter state: ServiceDiscovery");
 }
 
 Result ServiceDiscovery::feed(Event ev) {
@@ -158,7 +162,7 @@ Result ServiceDiscovery::feed(Event ev) {
 
         return {};
     } else {
-        m_ctx.log("expected ServiceDiscoveryReq! But code type id: %d", variant->get_type());
+        logf_warning("Expected ServiceDiscoveryReq! But code type id: %d", variant->get_type());
 
         // Sequence Error
         const message_20::Type req_type = variant->get_type();

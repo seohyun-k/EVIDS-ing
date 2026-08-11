@@ -1,6 +1,5 @@
 add_library(everest_util INTERFACE)
 add_library(everest::util ALIAS everest_util)
-ev_register_library_target(everest_helpers)
 
 include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
@@ -9,6 +8,7 @@ set_target_properties(everest_util PROPERTIES
   VERSION 0.0.1
 )
 
+target_compile_features(everest_util INTERFACE cxx_std_17)
 
 target_include_directories(everest_util
     INTERFACE
@@ -23,10 +23,10 @@ set_target_properties(everest_util
 
 install(TARGETS everest_util
     EXPORT everest-core-targets
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-    RUNTIME DESTINATION bin
-    INCLUDES DESTINATION include
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/everest
@@ -35,29 +35,11 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/everest
 )
 
 if(DISABLE_EDM)
-    # Do not use evc_setup_package() here: it unconditionally installs an
-    # export file for the package, which would export everest_util a second
-    # time alongside everest-core-targets and break non-EDM consumers.
-    set(EVEREST_UTIL_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/everest-util")
-
-    configure_package_config_file(
-        ${CMAKE_CURRENT_SOURCE_DIR}/config.cmake.in
-        ${CMAKE_CURRENT_BINARY_DIR}/everest-util-config.cmake
-        INSTALL_DESTINATION ${EVEREST_UTIL_CMAKE_INSTALL_DIR}
-        PATH_VARS CMAKE_INSTALL_INCLUDEDIR
-    )
-
-    write_basic_package_version_file(
-        ${CMAKE_CURRENT_BINARY_DIR}/everest-util-config-version.cmake
-        VERSION ${PROJECT_VERSION}
-        COMPATIBILITY ExactVersion
-    )
-
-    install(
-        FILES
-            ${CMAKE_CURRENT_BINARY_DIR}/everest-util-config.cmake
-            ${CMAKE_CURRENT_BINARY_DIR}/everest-util-config-version.cmake
-        DESTINATION ${EVEREST_UTIL_CMAKE_INSTALL_DIR}
+    evc_setup_package_no_export(
+        NAME everest-util
+        LIBRARY_NAME util
+        NAMESPACE everest
+        TYPE INTERFACE
     )
 endif()
 

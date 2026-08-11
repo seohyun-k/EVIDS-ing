@@ -3,12 +3,15 @@ add_executable(everest_util_tests
   async/thread_pool_tests.cpp
   async/thread_pool_scaling_tests.cpp
   async/wrapper_tests.cpp
+  misc/change_tracker_tests.cpp
   enum/EnumFlagsTest.cpp
   enum/EnumFlagsTest_B.cpp
+  math/comparison_tests.cpp
   queue/simple_queue_tests.cpp
   queue/thread_safe_queue_tests.cpp
   queue/thread_safe_bounded_queue_tests.cpp
   vector/fixed_vector_tests.cpp
+  fsm/fsm_tests.cpp
 )
 
 target_link_libraries(everest_util_tests

@@ -3,9 +3,9 @@
 
 #include <ocpp/v2/functional_blocks/security.hpp>
 
+#include <ocpp/common/connectivity_manager.hpp>
 #include <ocpp/common/constants.hpp>
 #include <ocpp/common/ocpp_logging.hpp>
-#include <ocpp/v2/connectivity_manager.hpp>
 #include <ocpp/v2/ctrlr_component_variables.hpp>
 #include <ocpp/v2/device_model.hpp>
 #include <ocpp/v2/functional_blocks/functional_block_context.hpp>
@@ -19,7 +19,7 @@
 #include <ocpp/v2/messages/SecurityEventNotification.hpp>
 #include <ocpp/v2/messages/SignCertificate.hpp>
 
-constexpr std::int32_t minimum_cert_signing_wait_time_seconds = 250;
+constexpr std::int32_t minimum_cert_signing_wait_time_seconds = 10;
 
 namespace ocpp::v2 {
 
@@ -100,7 +100,12 @@ Security::on_get_15118_ev_certificate_request(const Get15118EVCertificateRequest
         const ocpp::CallResult<Get15118EVCertificateResponse> call_result = response_message.message;
         return call_result.msg;
     } catch (const EnumConversionException& e) {
-        EVLOG_error << "EnumConversionException during handling of message: " << e.what();
+        EVLOG_error << "EnumConversionException during handling of Get15118EVCertificateResponse: " << e.what();
+        auto call_error = CallError(response_message.uniqueId, "FormationViolation", e.what(), json({}));
+        this->context.message_dispatcher.dispatch_call_error(call_error);
+        return response;
+    } catch (const json::exception& e) {
+        EVLOG_error << "json::exception during handling of Get15118EVCertificateResponse: " << e.what();
         auto call_error = CallError(response_message.uniqueId, "FormationViolation", e.what(), json({}));
         this->context.message_dispatcher.dispatch_call_error(call_error);
         return response;
@@ -322,7 +327,7 @@ void Security::handle_sign_certificate_response(CallResult<SignCertificateRespon
         }
         const int retry_backoff_seconds = clamp_to<int>(
             static_cast<double>(std::max(minimum_cert_signing_wait_time_seconds, cert_signing_wait_minimum.value())) *
-            std::pow(2, this->csr_attempt)); // prevent immediate repetition in case of value 0
+            std::pow(2, std::max(0, this->csr_attempt - 1))); // first wait = CertSigningWaitMinimum * 2^0
         this->certificate_signed_timer.timeout(
             [this]() {
                 EVLOG_info << "Did not receive CertificateSigned.req in time. Will retry with SignCertificate.req";

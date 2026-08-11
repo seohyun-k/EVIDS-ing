@@ -12,55 +12,49 @@
 namespace Everest {
 
 namespace {
-// Helper to split string by delimiter
-std::vector<std::string> split_topic(const std::string& topic, char delimiter = '/') {
-    std::vector<std::string> result;
-    std::istringstream stream(topic);
-    std::string part;
-    while (std::getline(stream, part, delimiter)) {
-        result.push_back(part);
-    }
-    return result;
-}
-
-// NOLINTNEXTLINE(misc-no-recursion)
-bool check_topic_matches(const std::string& full_topic, const std::string& wildcard_topic) {
+bool check_topic_matches(std::string_view full_topic, std::string_view wildcard_topic) {
     // Verbatim match
     if (full_topic == wildcard_topic) {
         return true;
     }
 
-    // Check if wildcard ends with "/#" and matches base
-    if (wildcard_topic.size() >= 2 && wildcard_topic.compare(wildcard_topic.size() - 2, 2, "/#") == 0) {
-        std::string start = wildcard_topic.substr(0, wildcard_topic.size() - 2);
-        if (check_topic_matches(full_topic, start)) {
+    std::size_t full_topic_pos = 0;
+    std::size_t wildcard_topic_pos = 0;
+
+    while (wildcard_topic_pos < wildcard_topic.size()) {
+        // Always match on the first multi-level wildcard found
+        if (wildcard_topic[wildcard_topic_pos] == '#') {
             return true;
         }
-    }
 
-    std::vector<std::string> full_split = split_topic(full_topic);
-    std::vector<std::string> wildcard_split = split_topic(wildcard_topic);
+        std::size_t wildcard_topic_next = wildcard_topic.find('/', wildcard_topic_pos);
+        std::size_t wildcard_topic_substr_len = (wildcard_topic_next == std::string_view::npos)
+                                                    ? std::string_view::npos
+                                                    : wildcard_topic_next - wildcard_topic_pos;
+        std::string_view wildcard_topic_substr = wildcard_topic.substr(wildcard_topic_pos, wildcard_topic_substr_len);
 
-    for (std::size_t partno = 0; partno < full_split.size(); ++partno) {
-        if (partno >= wildcard_split.size()) {
+        std::size_t full_topic_next = full_topic.find('/', full_topic_pos);
+        std::size_t full_topic_substr_len =
+            (full_topic_next == std::string_view::npos) ? std::string_view::npos : full_topic_next - full_topic_pos;
+        std::string_view full_topic_substr = full_topic.substr(full_topic_pos, full_topic_substr_len);
+
+        if (wildcard_topic_substr != "+" && wildcard_topic_substr != full_topic_substr) {
             return false;
         }
 
-        const std::string& full_part = full_split[partno];
-        const std::string& wildcard_part = wildcard_split[partno];
-
-        if (wildcard_part == "#") {
-            return true;
+        if (wildcard_topic_next == std::string_view::npos) {
+            return full_topic_next == std::string_view::npos;
         }
 
-        if (wildcard_part == "+" || wildcard_part == full_part) {
-            continue;
+        if (full_topic_next == std::string_view::npos) {
+            return wildcard_topic.substr(wildcard_topic_next + 1) == "#";
         }
 
-        return false;
+        wildcard_topic_pos = wildcard_topic_next + 1;
+        full_topic_pos = full_topic_next + 1;
     }
 
-    return full_split.size() == wildcard_split.size();
+    return full_topic_pos >= full_topic.size();
 }
 
 // Pure function: collects all handlers whose registered topic (with MQTT wildcard support)
@@ -98,18 +92,6 @@ MessageHandler::SharedTypedHandler copy_shared_handler(MessageHandler::SingleHan
     return handler_copy;
 }
 
-template <class FtorT, class... Args>
-void try_action_and_log(FtorT const& action, std::string const& error_source, std::string const& topic,
-                        Args&&... args) {
-    try {
-        action(topic, std::forward<Args>(args)...);
-    } catch (const std::exception& e) {
-        EVLOG_error << "Exception in " << error_source << " for topic '" << topic << "': " << e.what();
-    } catch (...) {
-        EVLOG_error << "Unknown exception in " << error_source << " for topic '" << topic << "'";
-    }
-}
-
 void warn_on_high_queue_size(everest::lib::util::simple_queue<ParsedMessage> const& queue, std::string const& topic) {
     if (queue.size() >= MAX_PENDING_MESSAGES_PER_TOPIC) {
         EVLOG_warning << "Pending message queue for topic '" << topic << "' has reached the limit ("
@@ -134,12 +116,22 @@ MessageHandler::~MessageHandler() {
 }
 
 void MessageHandler::add(const ParsedMessage& message) {
-    EVLOG_debug << "Adding message to queue: " << message.topic << " with data: " << message.data;
+    // Once stopped (during teardown) no further messages must be dispatched: doing so could
+    // enqueue work or spawn the ready thread after the worker threads have been joined and
+    // while the objects the handlers reference are being destroyed.
+    if (!this->running) {
+        return;
+    }
+
+    EVLOG_verbose << "Adding message to queue: " << message.topic << " with data: " << message.data;
 
     MqttMessageType msg_type = MqttMessageType::ExternalMQTT; // Default to ExternalMQTT if msg_type is not present
 
-    if (message.data.is_object() && message.data.contains("msg_type")) {
-        msg_type = string_to_mqtt_message_type(message.data.at("msg_type").get<std::string>());
+    if (message.data.is_object()) {
+        auto msg_type_it = message.data.find("msg_type");
+        if (msg_type_it != message.data.end() && msg_type_it->is_string()) {
+            msg_type = string_to_mqtt_message_type(msg_type_it->get<std::string>());
+        }
     }
 
     if (msg_type == MqttMessageType::CmdResult || msg_type == MqttMessageType::GetConfigResponse) {
@@ -163,7 +155,7 @@ void MessageHandler::add(const ParsedMessage& message) {
                     action = handle->global_ready;
                 }
                 if (action) {
-                    try_action_and_log(*(action->handler), "global_ready", topic_copy, data_copy);
+                    (*action->handler)(topic_copy, data_copy);
                 }
             });
         } // release ready monitor lock before joining
@@ -214,7 +206,7 @@ void MessageHandler::run_operation_dispatcher() {
         dispatch_operation_message(std::move(message.value()));
     }
 
-    EVLOG_info << "Operation dispatcher thread stopped";
+    EVLOG_debug << "Operation dispatcher thread stopped";
 }
 
 void MessageHandler::dispatch_operation_message(ParsedMessage&& message) {
@@ -237,11 +229,13 @@ void MessageHandler::schedule_operation_message(ParsedMessage&& message) {
     auto on_operation_message_done_ftor = bind_obj(&MessageHandler::on_operation_message_done, this);
     auto operation = [handle = std::move(handle_operation_message_ftor),
                       done = std::move(on_operation_message_done_ftor), message = std::move(message)]() {
-        // Wrap in try-catch so that on_operation_message_done is always called: an exception in
-        // the handler must not leave the topic permanently stuck in operation_topics_in_flight,
-        // which would block all subsequent messages for that topic.
-        try_action_and_log(handle, "handling operation message", message.topic, message.data);
-        try_action_and_log(done, "on_operation_message_done", message.topic);
+        try {
+            handle(message.topic, message.data);
+        } catch (...) {
+            done(message.topic);
+            throw;
+        }
+        done(message.topic);
     };
 
     if (operation_thread_pool) {
@@ -284,34 +278,29 @@ void MessageHandler::on_operation_message_done(const std::string& topic) {
 
 void MessageHandler::run_result_message_worker() {
     while (auto message = result_message_queue.wait_and_pop()) {
-        try_action_and_log(bind_obj(&MessageHandler::handle_result_message, this), "result worker", message->topic,
-                           message->data);
+        handle_result_message(message->topic, message->data);
     }
-    EVLOG_info << "Cmd result worker thread stopped";
+    EVLOG_debug << "Cmd result worker thread stopped";
 }
 
 void MessageHandler::run_external_mqtt_worker() {
-    auto callback = bind_obj(&MessageHandler::handle_external_mqtt_message, this);
     while (auto message = external_mqtt_message_queue.wait_and_pop()) {
-        try_action_and_log(callback, "External MQTT worker", message->topic, message->data);
+        handle_external_mqtt_message(message->topic, message->data);
     }
-    EVLOG_info << "External MQTT worker thread stopped";
+    EVLOG_debug << "External MQTT worker thread stopped";
 }
 
 void MessageHandler::handle_operation_message(const std::string& topic, const json& payload) {
-    json data;
     MqttMessageType msg_type = MqttMessageType::ExternalMQTT;
 
     // Determine message type
-    if (payload.contains("msg_type")) {
-        msg_type = string_to_mqtt_message_type(payload.at("msg_type").get<std::string>());
+    auto msg_type_it = payload.find("msg_type");
+    if (msg_type_it != payload.end() && msg_type_it->is_string()) {
+        msg_type = string_to_mqtt_message_type(msg_type_it->get_ref<const std::string&>());
     }
 
-    if (payload.contains("data")) {
-        data = payload.at("data");
-    } else {
-        data = payload;
-    }
+    auto data_it = payload.find("data");
+    const json& data = (data_it != payload.end()) ? *data_it : payload;
 
     switch (msg_type) {
     case MqttMessageType::Var:
@@ -339,12 +328,13 @@ void MessageHandler::handle_operation_message(const std::string& topic, const js
 }
 
 void MessageHandler::handle_result_message(const std::string& topic, const json& payload) {
-    if (!payload.contains("msg_type")) {
+    auto msg_type_it = payload.find("msg_type");
+    if (msg_type_it == payload.end()) {
         EVLOG_warning << "Received cmd_result message without msg_type: " << payload;
         return;
     }
 
-    const auto msg_type = string_to_mqtt_message_type(payload.at("msg_type").get<std::string>());
+    const auto msg_type = string_to_mqtt_message_type(msg_type_it->get<std::string>());
 
     if (msg_type == MqttMessageType::CmdResult) {
         handle_cmd_result(topic, payload);
@@ -416,8 +406,9 @@ void MessageHandler::handle_var_message(const std::string& topic, const json& da
         handler_copy = copy_shared_handler(handle->var, topic);
     }
 
+    const auto& json_data = data.at("data");
     for (const auto& handler : handler_copy) {
-        (*handler->handler)(topic, data.at("data"));
+        (*handler->handler)(topic, json_data);
     }
 }
 
@@ -483,7 +474,7 @@ void MessageHandler::handle_module_ready_message(const std::string& topic, const
 
 void MessageHandler::handle_cmd_result(const std::string& topic, const json& payload) {
     const auto& data = payload.at("data").at("data");
-    const auto id = data.at("id").get<std::string>();
+    const auto& id = data.at("id").get<std::string>();
 
     std::shared_ptr<TypedHandler> handler_copy;
     {

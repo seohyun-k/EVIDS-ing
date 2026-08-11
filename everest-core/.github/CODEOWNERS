@@ -7,6 +7,7 @@
 # .github
 /.github/ @pietfried @corneliusclaussen
 /.github/workflows/ @pietfried @corneliusclaussen @andistorm
+/.github/workflows/on_label.yaml @andistorm @nzbr
 
 # applications
 /applications/pionix_chargebridge @djchhp @corneliusclaussen
@@ -20,17 +21,19 @@
 # lib
 /lib/3rd_party/nanopb/ @a-w50 @corneliusclaussen @hikinggrass
 /lib/everest/can_dpm1000/ @a-w50 @corneliusclaussen @hikinggrass
+/lib/everest/evse_security/ @pietfried @hikinggrass @james-ctc
 /lib/everest/gpio/ @corneliusclaussen @hikinggrass @hikinggrass
 /lib/everest/conversions/ @hikinggrass @pietfried @corneliusclaussen @mlitre
 /lib/everest/slac/ @a-w50 @corneliusclaussen @SebaLukas
 /lib/everest/tls/ @james-ctc @mlitre @corneliusclaussen @SebaLukas @pietfried
 /lib/everest/everest_api_types/ @hikinggrass @pietfried @corneliusclaussen @djchhp @cburandt @florinmihut
-/lib/everest/io/ @djchhp @corneliusclaussen @hikinggrass @james-ctc @pietfried
+/lib/everest/io/ @djchhp @corneliusclaussen @hikinggrass @james-ctc @pietfried @mlitre
 
 # modules
 /modules/API/ @hikinggrass @pietfried @corneliusclaussen @djchhp @SebaLukas @james-ctc @cburandt @florinmihut
-/modules/API/RpcApi/ @FaHaGit @barsnick
-/modules/EnergyManagement/Energymanager/ @corneliusclaussen @hikinggrass @pietfried
+/modules/API/RpcApi/ @FaHaGit @barsnick @corneliusclaussen @hikinggrass @pietfried @SebaLukas @mlitre
+/modules/EnergyManagement/EEBUS/ @mlitre @andistorm @hikinggrass
+/modules/EnergyManagement/EnergyManager/ @corneliusclaussen @hikinggrass @pietfried
 /modules/EnergyManagement/EnergyNode/ @corneliusclaussen @hikinggrass @pietfried
 /modules/EV/EvManager/ @SebaLukas @pietfried @james-ctc @mlitre
 /modules/EV/PyEvJosev/ @SebaLukas @corneliusclaussen @pietfried @james-ctc @mlitre
@@ -39,7 +42,7 @@
 /modules/EVSE/EvseManager/ @corneliusclaussen @SebaLukas @hikinggrass @pietfried @mlitre
 /modules/EVSE/EvseSecurity/ @pietfried @hikinggrass @james-ctc @mlitre @SebaLukas
 /modules/EVSE/EvseSlac/ @a-w50 @corneliusclaussen @SebaLukas @pietfried @hikinggrass
-/modules/EVSE/EvseV2G/ @corneliusclaussen @SebaLukas @james-ctc @pietfried @hikinggrass @james-ctc @mlitre
+/modules/EVSE/EvseV2G/ @corneliusclaussen @SebaLukas @james-ctc @pietfried @hikinggrass @james-ctc @mlitre @barsnick @FaHaGit
 /modules/EVSE/OCPP/ @hikinggrass @pietfried @mlitre
 /modules/HardwareDrivers/ @pietfried @hikinggrass @corneliusclaussen @florinmihut @cburandt @djchhp
 /modules/EVSE/OCPP201/ @hikinggrass @pietfried @mlitre
@@ -67,3 +70,6 @@
 
 /dependencies.yaml @hikinggrass @pietfried @corneliusclaussen @SebaLukas @james-ctc @mlitre
 /module-dependencies.cmake @hikinggrass @pietfried @corneliusclaussen @SebaLukas @james-ctc @mlitre
+
+# yocto
+/yocto/ @hikinggrass @corneliusclaussen @james-ctc @andistorm @barsnick

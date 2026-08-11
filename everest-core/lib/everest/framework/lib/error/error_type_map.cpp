@@ -5,9 +5,9 @@
 #include <utils/error/error_type_map.hpp>
 
 #include <utils/error.hpp>
-#include <utils/yaml_loader.hpp>
 
 #include <everest/logging.hpp>
+#include <everest/utils/yaml_loader.hpp>
 
 namespace Everest {
 namespace error {
@@ -86,7 +86,7 @@ bool ErrorTypeMap::has(const ErrorType& error_type) const {
     return error_types.find(error_type) != error_types.end();
 }
 
-std::map<ErrorType, std::string> ErrorTypeMap::get_error_types() {
+const ErrorTypes& ErrorTypeMap::get_error_types() const {
     return error_types;
 }
 

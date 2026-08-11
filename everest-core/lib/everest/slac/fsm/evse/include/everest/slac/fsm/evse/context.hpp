@@ -190,10 +190,12 @@ struct EvseSlacConfig {
     int sounding_atten_adjustment = 0;
 
     bool reset_instead_of_fail{false};
+
+    bool regenerate_key_on_reset{true};
 };
 
 struct Context {
-    explicit Context(const ContextCallbacks& callbacks_) : callbacks(callbacks_){};
+    explicit Context(){};
 
     EvseSlacConfig slac_config{};
 
@@ -225,9 +227,7 @@ struct Context {
 
     ModemVendor modem_vendor{ModemVendor::Unknown};
     uint8_t evse_mac[ETH_ALEN];
-
-private:
-    const ContextCallbacks& callbacks;
+    ContextCallbacks callbacks;
 };
 
 } // namespace slac::fsm::evse

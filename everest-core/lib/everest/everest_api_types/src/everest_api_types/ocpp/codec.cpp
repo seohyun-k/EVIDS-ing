@@ -1,30 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2020 - 2025 Pionix GmbH and Contributors to EVerest
+// Copyright 2020 - 2026 Pionix GmbH and Contributors to EVerest
 
 #include "ocpp/codec.hpp"
 #include "nlohmann/json.hpp"
 #include "ocpp/API.hpp"
 #include "ocpp/json_codec.hpp"
 #include "utilities/constants.hpp"
+#include "utilities/json_codec_helpers.hpp"
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace everest::lib::API::V1_0::types::ocpp {
 
 #define create_serialize_impl(A)                                                                                       \
-    std::string serialize(A const& val) noexcept {                                                                     \
-        json result = val;                                                                                             \
-        return result.dump(json_indent);                                                                               \
-    }                                                                                                                  \
+    std::string serialize(A const& val) noexcept { return utilities::dump_json(val); }                                 \
     std::ostream& operator<<(std::ostream& os, A const& val) {                                                         \
         os << serialize(val);                                                                                          \
         return os;                                                                                                     \
     }                                                                                                                  \
-    template <> A deserialize(std::string const& val) {                                                                \
-        auto data = json::parse(val);                                                                                  \
-        A obj = data;                                                                                                  \
-        return obj;                                                                                                    \
-    }
+    template <> A deserialize(std::string_view val) { return utilities::parse_json<A>(val); }
 
 create_serialize_impl(AttributeEnum);
 create_serialize_impl(GetVariableStatusEnumType);
@@ -51,6 +46,10 @@ create_serialize_impl(SetVariableRequestList);
 create_serialize_impl(SetVariableResultList);
 create_serialize_impl(SecurityEvent);
 create_serialize_impl(StatusInfoType);
+create_serialize_impl(OperationalStatusEnumType);
+create_serialize_impl(ChangeAvailabilityStatusEnumType);
+create_serialize_impl(ChangeAvailabilityRequest);
+create_serialize_impl(ChangeAvailabilityResponse);
 create_serialize_impl(BootNotificationResponse);
 create_serialize_impl(OcppTransactionEvent);
 create_serialize_impl(MonitorVariableRequestList);
@@ -62,6 +61,8 @@ create_serialize_impl(ChargingSchedulePeriod);
 create_serialize_impl(OperationMode);
 create_serialize_impl(V2XSignalWattPointCurve);
 create_serialize_impl(V2XFreqWattPointType);
+create_serialize_impl(MessageDirection);
+create_serialize_impl(Message);
 
 #undef create_serialize_impl
 

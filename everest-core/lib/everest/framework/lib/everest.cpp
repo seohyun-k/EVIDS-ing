@@ -8,15 +8,13 @@
 #include <string_view>
 
 #include <boost/any.hpp>
-#include <boost/uuid/uuid.hpp>
-#include <boost/uuid/uuid_generators.hpp>
-#include <boost/uuid/uuid_io.hpp>
 #include <everest/logging.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 
 #include <date/date.h>
 #include <date/tz.h>
+#include <everest/helpers/helpers.hpp>
 #include <framework/everest.hpp>
 #include <utils/conversions.hpp>
 #include <utils/date.hpp>
@@ -38,6 +36,7 @@ using json_uri = nlohmann::json_uri;
 using json_validator = nlohmann::json_schema::json_validator;
 
 const auto remote_cmd_res_timeout_seconds = 300;
+const auto remote_cmd_res_timeout_step = std::chrono::seconds(1);
 const std::array<std::string_view, 3> TELEMETRY_RESERVED_KEYS = {{"connector_id"}};
 constexpr auto ensure_ready_timeout_ms = 100;
 
@@ -49,6 +48,8 @@ Everest::Everest(std::string module_id_, const Config& config_, bool validate_da
     module_id(std::move(module_id_)),
     ready_received(false),
     ready_processed(false),
+    shutdown_received(false),
+    shutdown_processed(false),
     remote_cmd_res_timeout(remote_cmd_res_timeout_seconds),
     validate_data_with_schema(validate_data_with_schema),
     mqtt_everest_prefix(mqtt_abstraction->get_everest_prefix()),
@@ -69,6 +70,7 @@ Everest::Everest(std::string module_id_, const Config& config_, bool validate_da
     this->telemetry_config = this->config.get_telemetry_config();
 
     this->on_ready = nullptr;
+    this->on_shutdown = nullptr;
 
     // setup error_manager_req_global if enabled + error_database + error_state_monitor
     if (this->module_manifest.contains("enable_global_errors") &&
@@ -204,7 +206,33 @@ Everest::Everest(std::string module_id_, const Config& config_, bool validate_da
         std::make_shared<TypedHandler>(HandlerType::GlobalReady, std::make_shared<Handler>(handle_ready_wrapper));
     this->mqtt_abstraction->register_handler(fmt::format("{}ready", mqtt_everest_prefix), everest_ready, QOS::QOS2);
 
+    // register handler for global shutdown signal
+    Handler handle_shutdown_wrapper = [this](const std::string&, const json& data) { this->handle_shutdown(data); };
+    std::shared_ptr<TypedHandler> everest_shutdown =
+        std::make_shared<TypedHandler>(HandlerType::ExternalMQTT, std::make_shared<Handler>(handle_shutdown_wrapper));
+    this->mqtt_abstraction->register_handler(fmt::format("{}shutdown", mqtt_everest_prefix), everest_shutdown,
+                                             QOS::QOS2);
+
     this->publish_metadata();
+}
+
+Everest::~Everest() {
+    BOOST_LOG_FUNCTION();
+
+    // The MQTT message-handler threads (owned by mqtt_abstraction, which is a shared_ptr and
+    // may outlive this object) invoke handlers that were registered by this instance and
+    // capture `this` (e.g. handle_ready(), handle_shutdown(), cmd/var/error handlers). Those
+    // threads must be stopped and joined before any member of this Everest instance
+    // (on_ready, on_shutdown, the registered handler lambdas, error managers, ...) is
+    // destroyed; otherwise a still-running handler thread could call into freed memory,
+    // causing use-after-free / std::bad_function_call crashes during shutdown.
+    //
+    // This destructor body runs before any member is destroyed, so it is the correct place
+    // to tear the threads down while everything they may touch is still alive.
+    if (this->mqtt_abstraction) {
+        this->mqtt_abstraction->disconnect();            // signal the MQTT main loop to stop
+        this->mqtt_abstraction->stop_message_handling(); // join all handler threads
+    }
 }
 
 void Everest::spawn_main_loop_thread() {
@@ -269,6 +297,17 @@ void Everest::register_on_ready_handler(const std::function<void()>& handler) {
     this->on_ready = std::make_unique<std::function<void()>>(handler);
 }
 
+void Everest::register_on_shutdown_handler(const std::function<void()>& handler) {
+    BOOST_LOG_FUNCTION();
+
+    if (!handler) {
+        // an empty handler would throw std::bad_function_call when invoked on shutdown;
+        // leave on_shutdown unset so the "no shutdown handler registered" warning path is taken
+        return;
+    }
+    this->on_shutdown = std::make_unique<std::function<void()>>(handler);
+}
+
 std::optional<ModuleTierMappings> Everest::get_3_tier_model_mapping() {
     return this->module_tier_mappings;
 }
@@ -280,10 +319,11 @@ void Everest::check_code() {
     for (const auto& element : module_manifest.at("provides").items()) {
         const auto& impl_id = element.key();
         const auto& impl_manifest = element.value();
-        const auto interface_definition = this->config.get_interface_definition(impl_manifest.at("interface"));
+        const auto interface_definition =
+            this->config.get_interface_definition(impl_manifest.at("interface").get<std::string_view>());
 
         std::set<std::string> cmds_not_registered;
-        std::set<std::string> impl_manifest_cmds_set;
+        std::set<std::string, std::less<>> impl_manifest_cmds_set;
         if (interface_definition.contains("cmds")) {
             impl_manifest_cmds_set = Config::keys(interface_definition.at("cmds"));
         }
@@ -312,7 +352,7 @@ void Everest::disconnect() {
     this->mqtt_abstraction->disconnect();
 }
 
-json Everest::call_cmd(const Requirement& req, const std::string& cmd_name, json json_args) {
+json Everest::call_cmd(const Requirement& req, const std::string& cmd_name, const json& json_args) {
     BOOST_LOG_FUNCTION();
 
     // resolve requirement
@@ -320,14 +360,14 @@ json Everest::call_cmd(const Requirement& req, const std::string& cmd_name, json
     const auto& connection = connections.at(req.index);
 
     // extract manifest definition of this command
-    const json cmd_definition = get_cmd_definition(connection.module_id, connection.implementation_id, cmd_name, true);
+    const json& cmd_definition = get_cmd_definition(connection.module_id, connection.implementation_id, cmd_name, true);
 
-    const json return_type = cmd_definition.at("result").at("type");
-
-    std::set<std::string> arg_names = Config::keys(json_args);
+    const json& return_type = cmd_definition.at("result").at("type");
 
     // check args against manifest
     if (this->validate_data_with_schema) {
+        std::set<std::string, std::less<>> arg_names = Config::keys(json_args);
+
         if (cmd_definition.at("arguments").size() != json_args.size()) {
             EVLOG_AND_THROW(EverestApiError(
                 fmt::format("Call to {}->{}({}): Argument count does not match manifest!",
@@ -336,7 +376,7 @@ json Everest::call_cmd(const Requirement& req, const std::string& cmd_name, json
         }
 
         std::set<std::string> unknown_arguments;
-        std::set<std::string> cmd_arguments;
+        std::set<std::string, std::less<>> cmd_arguments;
         if (cmd_definition.contains("arguments")) {
             cmd_arguments = Config::keys(cmd_definition.at("arguments"));
         }
@@ -350,9 +390,7 @@ json Everest::call_cmd(const Requirement& req, const std::string& cmd_name, json
                 this->config.printable_identifier(connection.module_id, connection.implementation_id), cmd_name,
                 fmt::join(arg_names, ","), fmt::join(arg_names, ","), fmt::join(cmd_arguments, ","))));
         }
-    }
 
-    if (this->validate_data_with_schema) {
         for (const auto& arg_name : arg_names) {
             try {
                 json_validator validator(
@@ -369,7 +407,7 @@ json Everest::call_cmd(const Requirement& req, const std::string& cmd_name, json
         }
     }
 
-    const std::string call_id = boost::uuids::to_string(boost::uuids::random_generator()());
+    const std::string call_id = everest::helpers::get_uuid();
 
     std::promise<CmdResult> res_promise;
     std::future<CmdResult> res_future = res_promise.get_future();
@@ -416,8 +454,21 @@ json Everest::call_cmd(const Requirement& req, const std::string& cmd_name, json
         std::chrono::steady_clock::now() + this->remote_cmd_res_timeout;
     std::future_status res_future_status = std::future_status::deferred;
     do {
-        res_future_status = res_future.wait_until(res_wait);
-    } while (res_future_status == std::future_status::deferred);
+        res_future_status = res_future.wait_for(remote_cmd_res_timeout_step);
+    } while (!this->shutdown_processed &&
+             (res_future_status == std::future_status::deferred ||
+              (res_future_status == std::future_status::timeout && std::chrono::steady_clock::now() < res_wait)));
+
+    if (res_future_status != std::future_status::ready && this->shutdown_processed) {
+        // Once the shutdown handler has returned, module communication is stopped (MQTT is
+        // disconnected), so a still-pending command result can never arrive. Throw to unwind the
+        // caller blocked on this command instead of letting it run into the command timeout.
+        // A result that already arrived is used normally, and commands called from within the
+        // shutdown handler itself (before shutdown_processed is set) are still processed.
+        EVLOG_AND_THROW(Shutdown(fmt::format(
+            "Shutting down while waiting for result of {}->{}()",
+            this->config.printable_identifier(connection.module_id, connection.implementation_id), cmd_name)));
+    }
 
     CmdResult result;
     if (res_future_status == std::future_status::timeout) {
@@ -459,7 +510,7 @@ json Everest::call_cmd(const Requirement& req, const std::string& cmd_name, json
     return result.result.value();
 }
 
-void Everest::publish_var(const std::string& impl_id, const std::string& var_name, json value) {
+void Everest::publish_var(const std::string& impl_id, const std::string& var_name, const json& value) {
     BOOST_LOG_FUNCTION();
 
     // check arguments
@@ -493,8 +544,7 @@ void Everest::publish_var(const std::string& impl_id, const std::string& var_nam
 
     const auto var_topic = fmt::format("{}/var/{}", this->config.mqtt_prefix(this->module_id, impl_id), var_name);
 
-    const json var_publish_data = {{"data", value}};
-    MqttMessagePayload payload{MqttMessageType::Var, var_publish_data};
+    MqttMessagePayload payload{MqttMessageType::Var, json{{"data", value}}};
 
     // FIXME(kai): implement an efficient way of choosing qos for each variable
     this->mqtt_abstraction->publish(var_topic, payload, QOS::QOS2);
@@ -503,16 +553,16 @@ void Everest::publish_var(const std::string& impl_id, const std::string& var_nam
 void Everest::subscribe_var(const Requirement& req, const std::string& var_name, const JsonCallback& callback) {
     BOOST_LOG_FUNCTION();
 
-    EVLOG_debug << fmt::format("subscribing to var: {}:{}", req.id, var_name);
+    EVLOG_verbose << fmt::format("subscribing to var: {}:{}", req.id, var_name);
 
     // resolve requirement
     const auto& connections = this->config.resolve_requirement(this->module_id, req.id);
     const auto& connection = connections.at(req.index);
 
-    const auto requirement_module_id = connection.module_id;
-    const auto module_name = this->config.get_module_name(requirement_module_id);
-    const auto requirement_impl_id = connection.implementation_id;
-    const auto requirement_impl_manifest = this->config.get_interface_definitions().at(
+    const auto& requirement_module_id = connection.module_id;
+    const auto& module_name = this->config.get_module_name(requirement_module_id);
+    const auto& requirement_impl_id = connection.implementation_id;
+    const auto& requirement_impl_manifest = this->config.get_interface_definitions().at(
         this->config.get_interfaces().at(module_name).at(requirement_impl_id));
 
     if (!requirement_impl_manifest.at("vars").contains(var_name)) {
@@ -521,7 +571,7 @@ void Everest::subscribe_var(const Requirement& req, const std::string& var_name,
                         this->config.printable_identifier(requirement_module_id, requirement_impl_id), var_name)));
     }
 
-    const auto requirement_manifest_vardef = requirement_impl_manifest.at("vars").at(var_name);
+    const auto& requirement_manifest_vardef = requirement_impl_manifest.at("vars").at(var_name);
 
     const auto handler = [this, requirement_module_id, requirement_impl_id, requirement_manifest_vardef, var_name,
                           callback](const std::string&, json const& data) {
@@ -559,7 +609,7 @@ void Everest::subscribe_error(const Requirement& req, const error::ErrorType& er
                               const error::ErrorCallback& raise_callback, const error::ErrorCallback& clear_callback) {
     BOOST_LOG_FUNCTION();
 
-    EVLOG_debug << fmt::format("subscribing to error: {}:{}", req.id, error_type);
+    EVLOG_verbose << fmt::format("subscribing to error: {}:{}", req.id, error_type);
 
     // resolve requirement
     const auto& connections = this->config.resolve_requirement(this->module_id, req.id);
@@ -715,10 +765,21 @@ void Everest::subscribe_global_all_errors(const error::ErrorCallback& raise_call
         const json provides = this->config.get_manifests().at(module_name).at("provides");
         for (const auto& impl : provides.items()) {
             const std::string& impl_id = impl.key();
-            const std::string error_topic = fmt::format("{}/error/#", this->config.mqtt_prefix(module_id, impl_id));
-            const std::shared_ptr<TypedHandler> error_token =
-                std::make_shared<TypedHandler>(HandlerType::SubscribeError, std::make_shared<Handler>(error_handler));
-            this->mqtt_abstraction->register_handler(error_topic, error_token, QOS::QOS2);
+
+            const auto& interface_definition = this->config.get_interface_definition(
+                std::string(this->config.get_interfaces().at(module_name).at(impl_id)));
+            for (const auto& error_namespace_it : interface_definition.at("errors").items()) {
+                const auto& error_namespace = error_namespace_it.key();
+                for (const auto& error_name_it : error_namespace_it.value().items()) {
+                    const auto& error_name = error_name_it.key();
+                    const std::string error_type = error_namespace + "/" + error_name;
+                    const std::string error_topic =
+                        fmt::format("{}/error/{}", this->config.mqtt_prefix(module_id, impl_id), error_type);
+                    const std::shared_ptr<TypedHandler> error_token = std::make_shared<TypedHandler>(
+                        HandlerType::SubscribeError, std::make_shared<Handler>(error_handler));
+                    this->mqtt_abstraction->register_handler(error_topic, error_token, QOS::QOS2);
+                }
+            }
         }
     }
 }
@@ -741,10 +802,10 @@ void Everest::publish_cleared_error(const std::string& impl_id, const error::Err
     this->mqtt_abstraction->publish(error_topic, payload, QOS::QOS2);
 }
 
-void Everest::external_mqtt_publish(const std::string& topic, const std::string& data) {
+void Everest::external_mqtt_publish(const std::string& topic, const std::string& data, bool retain) {
     BOOST_LOG_FUNCTION();
     check_external_mqtt();
-    this->mqtt_abstraction->publish(fmt::format("{}{}", this->mqtt_external_prefix, topic), data);
+    this->mqtt_abstraction->publish(fmt::format("{}{}", this->mqtt_external_prefix, topic), data, QOS::QOS2, retain);
 }
 
 UnsubscribeToken Everest::provide_external_mqtt_handler(const std::string& topic, const StringHandler& handler) {
@@ -774,8 +835,7 @@ UnsubscribeToken Everest::provide_external_mqtt_handler(const std::string& topic
 void Everest::telemetry_publish(const std::string& topic, const std::string& data) {
     BOOST_LOG_FUNCTION();
 
-    MqttMessagePayload payload{MqttMessageType::ExternalMQTT, data};
-    this->mqtt_abstraction->publish(fmt::format("{}{}", this->telemetry_prefix, topic), payload);
+    this->mqtt_abstraction->publish(fmt::format("{}{}", this->telemetry_prefix, topic), data);
 }
 
 void Everest::telemetry_publish(const std::string& category, const std::string& subcategory, const std::string& type,
@@ -863,6 +923,33 @@ void Everest::handle_ready(const json& data) {
     // this->heartbeat_thread = std::thread(&Everest::heartbeat, this);
 }
 
+/// \brief Shutdown handler for shutting down the module. Any message on the shutdown topic triggers
+/// the shutdown; the payload is only logged (it may carry the shutdown cause in the future).
+void Everest::handle_shutdown(const json& data) {
+    BOOST_LOG_FUNCTION();
+
+    EVLOG_debug << fmt::format("handle_shutdown: {}", data.dump());
+
+    if (this->shutdown_received) {
+        EVLOG_warning << "Ignoring repeated everest shutdown signal!";
+        return;
+    }
+    this->shutdown_received = true;
+
+    if (this->on_shutdown != nullptr) {
+        auto on_shutdown_handler = *on_shutdown;
+        on_shutdown_handler();
+    } else {
+        EVLOG_warning << "No shutdown handler registered for module " << this->module_id;
+    }
+
+    // Only after the shutdown handler has returned is communication cut; commands issued from
+    // within the handler are processed normally, pending commands fail with Shutdown from here on.
+    // Disconnect MQTT so the module main loop ends and the process exits via normal main() return.
+    this->shutdown_processed = true;
+    this->mqtt_abstraction->disconnect();
+}
+
 void Everest::provide_cmd(const std::string& impl_id, const std::string& cmd_name, const JsonCommand& handler) {
     BOOST_LOG_FUNCTION();
 
@@ -881,7 +968,7 @@ void Everest::provide_cmd(const std::string& impl_id, const std::string& cmd_nam
     const auto wrapper = [this, cmd_topic, impl_id, cmd_name, handler, cmd_definition](const std::string&, json data) {
         BOOST_LOG_FUNCTION();
 
-        std::set<std::string> arg_names;
+        std::set<std::string, std::less<>> arg_names;
         if (cmd_definition.contains("arguments")) {
             arg_names = Config::keys(cmd_definition.at("arguments"));
         }
@@ -1017,7 +1104,7 @@ void Everest::provide_cmd(const cmd& cmd) {
     // extract manifest definition of this command
     json cmd_definition = get_cmd_definition(this->module_id, impl_id, cmd_name, false);
 
-    std::set<std::string> arg_names;
+    std::set<std::string, std::less<>> arg_names;
     for (const auto& arg_type : arg_types) {
         arg_names.insert(arg_type.first);
     }
@@ -1030,7 +1117,7 @@ void Everest::provide_cmd(const cmd& cmd) {
     }
 
     std::set<std::string> unknown_arguments;
-    std::set<std::string> cmd_arguments;
+    std::set<std::string, std::less<>> cmd_arguments;
     if (cmd_definition.contains("arguments")) {
         cmd_arguments = Config::keys(cmd_definition.at("arguments"));
     }

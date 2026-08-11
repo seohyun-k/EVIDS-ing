@@ -9,14 +9,16 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 
 namespace everest::lib::util {
 
 /**
  * A thread safe bounded queue implemented on top of \ref queue::simple_queue. <br>
  * The common resource \ref simple_queue is guarded by a mutex in every member function.
- * A caller blocking on \p push will be unblocked when space becomes available via \p pop.
- * A caller blocking on \p pop or \p try_pop will be unblocked when new data is made available via \p push.
+ * A caller blocking on \p push or \p emplace will be unblocked when space becomes available via \p pop.
+ * A caller blocking on \p pop or \p try_pop will be unblocked when new data is made available via \p push or \p
+ * emplace.
  * @tparam T Datatype held by the queue
  */
 template <class T> class thread_safe_bounded_queue {
@@ -47,21 +49,8 @@ public:
      * @param[in] value data
      * @return The size of the queue after push. Returns 0 if the queue is stopped.
      */
-    size_type push(const value_type& value) {
-        std::unique_lock lock(m_mtx);
-        if (m_max_size > 0) {
-            m_cv_producer.wait(lock, [this]() { return m_queue.size() < m_max_size || m_stop; });
-        }
-
-        if (m_stop) {
-            return 0;
-        }
-
-        m_queue.push(value);
-        auto result = m_queue.size();
-        lock.unlock();
-        m_cv_consumer.notify_one();
-        return result;
+    size_type push(value_type const& value) {
+        return emplace(value);
     }
 
     /**
@@ -71,6 +60,16 @@ public:
      * @return The size of the queue after push. Returns 0 if the queue is stopped.
      */
     size_type push(value_type&& value) {
+        return emplace(std::move(value));
+    }
+
+    /**
+     * @brief Construct a new element in-place at the end of the queue.
+     * @details Blocks the caller if the queue has reached its \p max_size.
+     * @param[in] args Arguments forwarded to construct the data element.
+     * @return The size of the queue after emplace. Returns 0 if the queue is stopped.
+     */
+    template <class... Args> size_type emplace(Args&&... args) {
         std::unique_lock lock(m_mtx);
         if (m_max_size > 0) {
             m_cv_producer.wait(lock, [this]() { return m_queue.size() < m_max_size || m_stop; });
@@ -80,7 +79,7 @@ public:
             return 0;
         }
 
-        m_queue.push(std::forward<value_type>(value));
+        m_queue.emplace(std::forward<Args>(args)...);
         auto result = m_queue.size();
         lock.unlock();
         m_cv_consumer.notify_one();
@@ -143,12 +142,20 @@ public:
      * @return std::optional containing the time_point of the oldest task,
      * or std::nullopt if the queue is empty.
      */
-    std::optional<std::chrono::steady_clock::time_point> oldest_arrival() {
+    std::optional<std::chrono::steady_clock::time_point> oldest_arrival() const {
         std::lock_guard lock(m_mtx);
         if (m_queue.empty()) {
             return std::nullopt;
         }
         return m_queue.front().arrival;
+    }
+
+    /**
+     * @brief Safely returns the current number of elements in the queue.
+     */
+    size_type size() const {
+        std::lock_guard lock(m_mtx);
+        return m_queue.size();
     }
 
 private:
@@ -181,7 +188,7 @@ private:
 
     simple_queue<T> m_queue;               ///< The underlying non-thread-safe container.
     const size_type m_max_size;            ///< Maximum capacity of the queue.
-    std::mutex m_mtx;                      ///< Mutex guarding access to the queue and state.
+    mutable std::mutex m_mtx;              ///< Mutex guarding access to the queue and state.
     std::condition_variable m_cv_consumer; ///< Condition variable for consumers waiting for data.
     std::condition_variable m_cv_producer; ///< Condition variable for producers waiting for space.
     bool m_stop{false};                    ///< Flag indicating the queue is shutting down.

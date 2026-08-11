@@ -3,16 +3,15 @@
 
 #pragma once
 
+#include "nlohmann/json_fwd.hpp"
 #include <everest_api_types/session_cost/API.hpp>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wignored-qualifiers"
-#pragma GCC diagnostic ignored "-Wunused-function"
-#include "generated/types/session_cost.hpp"
-#pragma GCC diagnostic pop
 
 namespace everest::lib::API::V1_0::types::session_cost {
 
 using json = nlohmann::json;
+
+void to_json(json& j, DefaultPrice const& k) noexcept;
+void from_json(const json& j, DefaultPrice& k);
 
 void to_json(json& j, TariffMessage const& k) noexcept;
 void from_json(const json& j, TariffMessage& k);

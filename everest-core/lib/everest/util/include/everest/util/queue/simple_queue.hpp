@@ -72,7 +72,16 @@ public:
      * @brief Maps to std::queue::push(value_type&&)
      */
     void push(value_type&& value) {
-        m_queue.push(std::forward<value_type>(value));
+        m_queue.push(std::move(value));
+    }
+
+    /**
+     * @brief Maps to std::queue::emplace(Args&&...)
+     * @details Constructs an element in-place directly within the underlying queue.
+     * @param[in] args Arguments forwarded to construct the data element.
+     */
+    template <class... Args> void emplace(Args&&... args) {
+        m_queue.emplace(std::forward<Args>(args)...);
     }
 
     /**

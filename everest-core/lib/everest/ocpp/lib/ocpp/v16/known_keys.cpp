@@ -1,10 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2020 - 2026 Pionix GmbH and Contributors to EVerest
 
+#include "ocpp/v2/ocpp_enums.hpp"
+#include <everest/logging.hpp>
 #include <ocpp/v16/known_keys.hpp>
+#include <ocpp/v2/comparators.hpp>
+#include <ocpp/v2/ctrlr_component_variables.hpp>
 
 #include <algorithm>
 #include <iterator>
+#include <map>
+#include <optional>
+#include <string>
+#include <tuple>
+#include <utility>
 
 namespace {
 using ocpp::v16::keys::valid_keys;
@@ -42,6 +51,7 @@ using ocpp::v16::keys::valid_keys;
     key(WebsocketPingPayload) \
     key(WebsocketPongTimeout) \
     key(QueueAllMessages) \
+    key(ReportClearedErrors) \
     key(MessageTypesDiscardForQueueing) \
     key(MessageQueueSizeThreshold) \
     key(ConnectorPhaseRotationMaxLength) \
@@ -92,6 +102,102 @@ constexpr valid_keys read_only[] = {FOR_ALL_READONLY(VALUE)};
 constexpr valid_keys hidden[] = {FOR_ALL_HIDDEN(VALUE)};
 
 #undef VALUE
+
+// ocpp/v2/comparators.hpp ordering, so instance/evse-qualified CVs never alias the unqualified mapping
+using ReverseKey = std::tuple<ocpp::v2::Component, ocpp::v2::Variable, ocpp::v2::AttributeEnum>;
+
+class V2ConfigMap {
+private:
+    bool configured{false};
+    std::map<std::string_view, const ocpp::v2::ComponentVariable*> map;
+    std::map<ReverseKey, std::string_view> reverse_map;
+
+    void configure(const std::string_view& v16, const ocpp::v2::ComponentVariable& cv);
+    void configure();
+    void warn_no_mapping(const std::string_view& v16);
+    void check();
+
+public:
+    ocpp::v16::keys::DeviceModel_CV convert_v2(const std::string_view& v16_key);
+    std::optional<std::string> convert_v2(const ocpp::v2::Component& component, const ocpp::v2::Variable& variable,
+                                          ocpp::v2::AttributeEnum attribute);
+};
+
+void V2ConfigMap::configure(const std::string_view& v16, const ocpp::v2::ComponentVariable& cv) {
+    if (cv.variable) {
+        if (const auto it = map.find(v16); it != map.end()) {
+            if (it->second->variable) {
+                EVLOG_warning << "V16 " << v16 << ": '" << it->second->variable->name << "' replaced with '"
+                              << cv.variable->name << '\'';
+            }
+        }
+        map.insert_or_assign(v16, &cv);
+
+        // Max-limit keys share the same v2 variable as their corresponding data key, but they map to
+        // VariableCharacteristics.maxLimit rather than VariableAttribute.value. Skip the reverse map
+        // so the data key (e.g. MeterValuesAlignedData) remains the canonical reverse mapping.
+        const auto key = ocpp::v16::keys::convert(v16);
+        if (key && ocpp::v16::keys::is_max_limit_key(key.value())) {
+            return;
+        }
+
+        ReverseKey reverse_key{cv.component, cv.variable.value(), ocpp::v2::AttributeEnum::Actual};
+        if (const auto it = reverse_map.find(reverse_key); it != reverse_map.end()) {
+            EVLOG_error << "V2 " << cv.component.name << '/' << cv.variable->name << ": '" << it->second
+                        << "' replaced with '" << v16 << '\'';
+        }
+        reverse_map.insert_or_assign(std::move(reverse_key), v16);
+    }
+}
+
+#define VALUE(a, b) configure(#a, ocpp::v2::ControllerComponentVariables::b);
+void V2ConfigMap::configure() {
+    if (!configured) {
+        configured = true;
+        MAPPING_ALL(VALUE)
+        check();
+    }
+}
+#undef VALUE
+
+void V2ConfigMap::warn_no_mapping(const std::string_view& v16) {
+    const auto it = map.find(v16);
+    if (it == map.end()) {
+        EVLOG_error << "No V2 mapping for " << v16;
+    }
+}
+
+#define VALUE(a, b) warn_no_mapping(#b);
+void V2ConfigMap::check() {
+    if (configured) {
+        FOR_ALL_MAPPED_KEYS(VALUE);
+    }
+}
+#undef VALUE
+
+ocpp::v16::keys::DeviceModel_CV V2ConfigMap::convert_v2(const std::string_view& v16_key) {
+    configure();
+    ocpp::v16::keys::DeviceModel_CV result;
+    std::string name{v16_key};
+    if (const auto it = map.find(name); it != map.end() && it->second->variable) {
+        result = std::make_pair(it->second->component, it->second->variable.value());
+    }
+    return result;
+}
+
+std::optional<std::string> V2ConfigMap::convert_v2(const ocpp::v2::Component& component,
+                                                   const ocpp::v2::Variable& variable,
+                                                   ocpp::v2::AttributeEnum attribute) {
+    configure();
+    std::optional<std::string> result;
+    if (const auto it = reverse_map.find(ReverseKey{component, variable, attribute}); it != reverse_map.end()) {
+        result = it->second;
+    }
+    return result;
+}
+
+V2ConfigMap v2_map;
+
 } // namespace
 
 namespace ocpp::v16::keys {
@@ -156,6 +262,46 @@ bool is_readonly(valid_keys key) {
 
 bool is_hidden(valid_keys key) {
     return std::find(std::cbegin(hidden), std::cend(hidden), key) != std::cend(hidden);
+}
+
+#undef VALUE
+#define VALUE(a, b)                                                                                                    \
+    case valid_keys::b:                                                                                                \
+        return ocpp::v16::SupportedFeatureProfiles::a;
+
+std::optional<ocpp::v16::SupportedFeatureProfiles> get_profile(valid_keys key) {
+    switch (key) {
+        FOR_ALL_KEYS(VALUE)
+    default:
+        break;
+    }
+    return std::nullopt;
+}
+
+#undef VALUE
+
+DeviceModel_CV convert_v2(const std::string_view& str) {
+    if (const auto key = convert(str)) {
+        return convert_v2(*key);
+    }
+    return v2_map.convert_v2(str);
+}
+
+DeviceModel_CV convert_v2(valid_keys key) {
+    return v2_map.convert_v2(convert(key));
+}
+
+std::optional<std::string> convert_v2(const ocpp::v2::Component& component, const ocpp::v2::Variable& variable,
+                                      ocpp::v2::AttributeEnum attribute) {
+    return v2_map.convert_v2(component, variable, attribute);
+}
+
+bool is_max_limit_key(valid_keys key) {
+    for (const auto& [k, cv] : max_limit_entries) {
+        if (k == key)
+            return true;
+    }
+    return false;
 }
 
 } // namespace ocpp::v16::keys

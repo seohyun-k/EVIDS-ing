@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <memory>
 
-#include <ocpp/v2/connectivity_manager.hpp>
+#include <ocpp/common/connectivity_manager.hpp>
 #include <ocpp/v2/device_model.hpp>
 
 #include <ocpp/v2/messages/BootNotification.hpp>
@@ -17,6 +17,9 @@
 #include <ocpp/v2/messages/TransactionEvent.hpp>
 #include <ocpp/v2/messages/UnlockConnector.hpp>
 #include <ocpp/v2/messages/UpdateFirmware.hpp>
+
+#include <ocpp/v21/functional_blocks/der_control.hpp>
+#include <ocpp/v21/messages/SetDERControl.hpp>
 
 namespace ocpp::v2 {
 struct Callbacks {
@@ -102,7 +105,7 @@ struct Callbacks {
     std::optional<ConfigureNetworkConnectionProfileCallback> configure_network_connection_profile_callback;
     std::optional<std::function<void(const ocpp::DateTime& currentTime)>> time_sync_callback;
 
-    /// \brief callback to be called to configure ocpp message logging
+    /// \brief Callback function is called when a OCPP message is sent or received
     std::optional<std::function<void(const std::string& message, MessageDirection direction)>> ocpp_messages_callback;
 
     ///
@@ -171,6 +174,11 @@ struct Callbacks {
     /// contains tariff and cost information.
     std::optional<std::function<void(const TariffMessage& message)>> tariff_message_callback;
 
+    /// \brief Callback function is called on startup and whenever the applicable default price changes (e.g. after a
+    /// connectivity state change or a configuration update that affects the fallback price variables). The argument
+    /// contains the price text in one or more languages; the first entry uses the configured default language.
+    std::optional<std::function<void(const std::vector<DisplayMessageContent>& messages)>> default_price_callback;
+
     /// \brief Callback function is called when a reservation request is received from the CSMS
     std::optional<std::function<ReserveNowStatusEnum(const ReserveNowRequest& request)>> reserve_now_callback;
     /// \brief Callback function is called when a cancel reservation request is received from the CSMS
@@ -183,6 +191,11 @@ struct Callbacks {
     std::optional<std::function<bool(const std::vector<ocpp::v2::EnergyTransferModeEnum> allowed_energy_transfer_modes,
                                      const CiString<36> transaction_id)>>
         update_allowed_energy_transfer_modes_callback;
+
+    /// \brief Carries the full set of currently-active DER controls, emitted after every accepted transition.
+    /// The provider replaces its applied set wholesale from this argument rather than tracking transitions.
+    std::optional<std::function<void(const std::vector<ocpp::v21::SetDERControlRequest>& active_controls)>>
+        der_active_directives_callback;
 
     /// @} // End group
 };

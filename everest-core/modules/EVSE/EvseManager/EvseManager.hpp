@@ -63,6 +63,7 @@ struct Conf {
     bool payment_enable_eim;
     bool payment_enable_contract;
     double ac_nominal_voltage;
+    double ac_max_reactive_power;
     bool ev_receipt_required;
     bool session_logging;
     std::string session_logging_path;
@@ -107,6 +108,7 @@ struct Conf {
     std::string switch_3ph1ph_cp_state;
     int soft_over_current_timeout_ms;
     bool lock_connector_in_state_b;
+    bool unlock_when_deauthorized;
     int state_F_after_fault_ms;
     bool fail_on_powermeter_errors;
     bool raise_mrec9;
@@ -114,14 +116,14 @@ struct Conf {
     bool central_contract_validation_allowed;
     bool contract_certificate_installation_enabled;
     bool inoperative_error_use_vendor_id;
+    double voltage_plausibility_max_spread_threshold_V;
+    int voltage_plausibility_fault_duration_ms;
     std::string session_id_type;
     bool zero_power_ignore_pause;
     bool zero_power_allow_ev_to_ignore_pause;
     std::string bpt_channel;
     std::string bpt_generator_mode;
     std::string bpt_grid_code_island_method;
-    double voltage_plausibility_max_spread_threshold_V;
-    int voltage_plausibility_fault_duration_ms;
     int hlc_charge_loop_without_energy_timeout_s;
     int dc_ramp_ampere_per_second;
 };
@@ -186,7 +188,6 @@ public:
 
     // ev@1fce4c5e-0ab8-41bb-90f7-14277703d2ac:v1
     // insert your public definitions here
-    std::unique_ptr<Charger> charger;
     sigslot::signal<int> signalNrOfPhasesAvailable;
     types::powermeter::Powermeter get_latest_powermeter_data_billing();
     types::evse_board_support::HardwareCapabilities get_hw_capabilities();
@@ -245,6 +246,8 @@ public:
     std::unique_ptr<IECStateMachine> bsp;
     std::unique_ptr<ErrorHandling> error_handling;
     std::unique_ptr<PersistentStore> store;
+    // Declared last so it is destroyed first; ~Charger dereferences bsp/error_handling/store.
+    std::unique_ptr<Charger> charger;
 
     std::atomic_bool random_delay_enabled{false};
     std::atomic_bool random_delay_running{false};
@@ -289,6 +292,12 @@ public:
         // limits are not yet included in request.
     }
     std::atomic_int ac_nr_phases_active{0};
+
+    std::atomic<bool> der_available{false};
+    void recompute_and_publish_supported_ac_energy_transfers();
+    bool is_hlc_enabled() const {
+        return hlc_enabled;
+    }
     // ev@1fce4c5e-0ab8-41bb-90f7-14277703d2ac:v1
 
 protected:
@@ -355,7 +364,7 @@ private:
 
     types::authorization::ProvidedIdToken autocharge_token;
 
-    void log_v2g_message(types::iso15118::V2gMessages v2g_messages);
+    void log_v2g_message(types::iso15118::V2gMessages const& v2g_messages);
 
     // Reservations
     bool reserved;
@@ -406,6 +415,7 @@ private:
 
     static constexpr double CABLECHECK_CURRENT_LIMIT{2};
     static constexpr double CABLECHECK_INSULATION_FAULT_RESISTANCE_OHM{100000.};
+    static constexpr double CABLECHECK_MCS_INSULATION_FAULT_RESISTANCE_OHM{125000.};
     static constexpr double CABLECHECK_SAFE_VOLTAGE{60.};
     static constexpr int CABLECHECK_SELFTEST_TIMEOUT{30};
 

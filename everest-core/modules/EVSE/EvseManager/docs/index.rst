@@ -65,11 +65,6 @@ Software over-voltage supervision is always active during DC charging. The confi
 must exceed the negotiated limit before EvseManager raises ``MREC5OverVoltage``.
 Set it to ``0`` to trigger immediately once the threshold is crossed.
 
-Software over-voltage supervision is always active during DC charging. The configuration option
-``internal_over_voltage_duration_ms`` defines for how long the measured DC voltage
-must exceed the negotiated limit before EvseManager raises ``MREC5OverVoltage``.
-Set it to ``0`` to trigger immediately once the threshold is crossed.
-
 Published variables
 ===================
 
@@ -99,6 +94,134 @@ from the power meter that can be used for billing (DC side on DC, AC side on
 AC). If no powermeter is connected EvseManager will never publish this
 variable.
 
+
+Charging State Machine
+======================
+
+.. mermaid::
+
+   stateDiagram-v2
+       direction TB
+
+       [*] --> Idle
+
+       %% Enable / Disable
+       Idle --> Disabled : disable
+       Disabled --> Idle : enable
+
+       %% Happy path
+       Idle --> WaitingForAuthentication : EV plugged in
+       WaitingForAuthentication --> PrepareCharging : Authorized
+       PrepareCharging --> Charging : Contactor close allowed
+       Charging --> StoppingCharging : Stop condition
+       StoppingCharging --> Finished : Transaction end
+       Finished --> Idle : EV unplugged
+
+       %% Early exit / Errors
+       WaitingForAuthentication --> Finished : Fatal error or EV unplugged
+       PrepareCharging --> StoppingCharging : Fatal error, deauth, or EV unplugged
+
+       %% Pauses
+       Charging --> ChargingPausedEV : EV moves to state B
+       ChargingPausedEV --> PrepareCharging : Power requested (BCB/Car)
+       ChargingPausedEV --> ChargingPausedEVSE : No power (AC BASIC)
+       ChargingPausedEV --> StoppingCharging : Deauth or unplugged
+       
+       ChargingPausedEVSE --> PrepareCharging : Power available / Errors cleared
+       ChargingPausedEVSE --> StoppingCharging : Deauth or unplugged
+
+       %% Post-Stop logic
+       StoppingCharging --> ChargingPausedEV : EV-initiated pause
+
+State Transitions
+-----------------
+
+**Basic Flow**
+
+* ``Idle`` -> ``WaitingForAuthentication``: EV plugged in.
+* ``WaitingForAuthentication`` -> ``PrepareCharging``: Authorized by EIM or PnC.
+* ``PrepareCharging`` -> ``Charging``: Contactor close allowed.
+* ``Charging`` -> ``StoppingCharging``: Triggered by any **Stop Condition** (see below).
+* ``StoppingCharging`` -> ``Finished``: No transaction, EV unplugged, or not authorized.
+* ``Finished`` -> ``Idle``: EV unplugged.
+
+**Pause & Resume**
+
+* ``ChargingPausedEV`` -> ``PrepareCharging``: BCB toggle or ``CarRequestedPower``.
+* ``ChargingPausedEV`` -> ``ChargingPausedEVSE``: No power available (AC BASIC only).
+* ``ChargingPausedEVSE`` -> ``PrepareCharging``: Power available, no EVSE pause and errors cleared.
+* ``StoppingCharging`` -> ``ChargingPausedEV``: EV-initiated pause after stop sequence.
+
+**Stop Conditions**
+
+The transition ``Charging`` -> ``StoppingCharging`` occurs if:
+    * Fatal error
+    * Deauthorization
+    * EVSE pause requested
+    * EV unplugged
+    * IEC contactor opened
+    * No power available (Immediate for AC BASIC; timeout for HLC).
+
+.. note::
+
+   Transient helper states (``T_step_EF``, ``T_step_X1``, and ``SwitchPhases``) are omitted 
+   for readability. Transitions passing through these are shown as direct arrows.
+
+Session Events
+--------------
+
+These are the ``SessionEvent`` values published by the EvseManager with respect to the state machine
+states and transitions.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 30 35
+
+   * - State / Transition
+     - Event
+     - Trigger
+   * - ``Disabled``
+     - ``Disabled``
+     - On entry
+   * - ``Idle``
+     - ``Enabled``
+     - When EVSE is enabled via ``enable_disable()``
+   * - ``WaitingForAuthentication``
+     - ``SessionStarted``
+     - On entry (new session)
+   * - ``WaitingForAuthentication``
+     - ``AuthRequired``
+     - On entry
+   * - ``WaitingForAuthentication``
+     - ``Authorized``
+     - When ``authorize()`` is called externally
+   * - ``WaitingForAuthentication``
+     - ``TransactionStarted``
+     - After auth is accepted, just before leaving state
+   * - ``PrepareCharging``
+     - ``PrepareCharging``
+     - On entry
+   * - ``Charging``
+     - ``ChargingStarted``
+     - On entry
+   * - ``ChargingPausedEV``
+     - ``ChargingPausedEV``
+     - On entry
+   * - ``ChargingPausedEVSE``
+     - ``ChargingPausedEVSE``
+     - When the set of pause reasons changes
+   * - ``StoppingCharging``
+     - ``StoppingCharging``
+     - On entry
+   * - ``Finished``
+     - ``ChargingFinished``
+     - On entry (if transaction was active)
+   * - ``Finished``
+     - ``TransactionFinished``
+     - On entry (if transaction was active)
+   * - ``Finished`` -> ``Idle``
+     - ``SessionFinished``
+     - When EV unplugs and ``stop_session()`` is called
 
 Authentication
 ==============
@@ -224,6 +347,23 @@ freedom to make the choice in this case.
 Take care especially with the power(watt) and time based hysteresis settings. They should be adjusted to the
 actual use case to avoid relays wearing due too a lot of switching cycles. Consider also to limit the maximum
 number of switching cycles per charging session.
+
+DER (grid support) advertising
+==============================
+
+EvseManager exposes a ``set_der_available`` command that records, per EVSE, whether DER directive support
+(a ``grid_support`` provider) is wired for that EVSE. This is a boot-time fact asserted by whichever module
+provides the ``grid_support`` connection (the OCPP module is one such provider, asserting it from the presence
+of a ``grid_support`` connection); the EV's runtime DER capability is never sent here.
+
+When DER is available and the EVSE is export-capable (its hardware capabilities report a non-zero export
+current and at least one export phase), EvseManager folds the ISO 15118-20 ``AC_DER_IEC`` energy transfer mode
+into the set it advertises, alongside ``AC_BPT`` (advertised whenever ``supported_iso_ac_bpt`` is set and the
+EVSE is export-capable). ISO 15118-20 has no combined ``AC_BPT_DER`` service category, so "AC_BPT_DER supported"
+is conveyed by advertising both ``AC_BPT`` and ``AC_DER_IEC`` as separate energy transfer modes; the EV selects
+one per session.
+
+The command returns ``NoHlc`` when no HLC is enabled for the EVSE (and does nothing), and ``Accepted`` otherwise.
 
 Error Handling
 ==============

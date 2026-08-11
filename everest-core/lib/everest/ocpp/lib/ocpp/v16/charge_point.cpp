@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2020 - 2023 Pionix GmbH and Contributors to EVerest
+// Copyright 2020 - 2026 Pionix GmbH and Contributors to EVerest
 
 #include <everest/logging.hpp>
 #include <ocpp/v16/charge_point.hpp>
@@ -9,12 +9,25 @@
 namespace ocpp {
 namespace v16 {
 
-ChargePoint::ChargePoint(ChargePointConfigurationInterface& cfg, const fs::path& share_path,
-                         const fs::path& database_path, const fs::path& sql_init_path, const fs::path& message_log_path,
-                         const std::shared_ptr<EvseSecurity> evse_security,
-                         const std::optional<SecurityConfiguration> security_configuration) {
+ChargePoint::ChargePoint(
+    ChargePointConfigurationInterface& cfg, const fs::path& share_path, const fs::path& database_path,
+    const fs::path& sql_init_path, const fs::path& message_log_path, const std::shared_ptr<EvseSecurity> evse_security,
+    const std::optional<SecurityConfiguration> security_configuration,
+    const std::function<void(const std::string& message, MessageDirection direction)>& message_callback) {
+    this->charge_point =
+        std::make_unique<ChargePointImpl>(cfg, share_path, database_path, sql_init_path, message_log_path,
+                                          evse_security, security_configuration, message_callback);
+}
+
+ChargePoint::ChargePoint(
+    ChargePointConfigurationInterface& cfg, const fs::path& share_path, const fs::path& database_path,
+    const fs::path& sql_init_path, const fs::path& message_log_path, const std::shared_ptr<EvseSecurity> evse_security,
+    std::shared_ptr<ocpp::ConnectivityManagerInterface> connectivity_manager,
+    const std::optional<SecurityConfiguration> security_configuration,
+    const std::function<void(const std::string& message, MessageDirection direction)>& message_callback) {
     this->charge_point = std::make_unique<ChargePointImpl>(cfg, share_path, database_path, sql_init_path,
-                                                           message_log_path, evse_security, security_configuration);
+                                                           message_log_path, evse_security, connectivity_manager,
+                                                           security_configuration, message_callback);
 }
 
 ChargePoint::~ChargePoint() = default;
@@ -43,8 +56,8 @@ bool ChargePoint::init(const std::map<int, ChargePointStatus>& connector_status_
 }
 
 bool ChargePoint::start(const std::map<int, ChargePointStatus>& connector_status_map, BootReasonEnum bootreason,
-                        const std::set<std::string>& resuming_session_ids) {
-    return this->charge_point->start(connector_status_map, bootreason, resuming_session_ids);
+                        const std::set<std::string>& resuming_session_ids, bool start_connecting) {
+    return this->charge_point->start(connector_status_map, bootreason, resuming_session_ids, start_connecting);
 }
 
 bool ChargePoint::restart(const std::map<int, ChargePointStatus>& connector_status_map, BootReasonEnum bootreason) {
@@ -61,6 +74,25 @@ void ChargePoint::connect_websocket() {
 
 void ChargePoint::disconnect_websocket() {
     this->charge_point->disconnect_websocket();
+}
+
+void ChargePoint::reload_network_profiles() {
+    this->charge_point->reload_network_profiles();
+}
+
+void ChargePoint::on_websocket_connected(const int configuration_slot,
+                                         const ocpp::v2::NetworkConnectionProfile& network_connection_profile,
+                                         const ocpp::OcppProtocolVersion ocpp_version) {
+    this->charge_point->on_websocket_connected(configuration_slot, network_connection_profile, ocpp_version);
+}
+
+void ChargePoint::on_websocket_disconnected(const int configuration_slot,
+                                            const ocpp::v2::NetworkConnectionProfile& network_connection_profile) {
+    this->charge_point->on_websocket_disconnected(configuration_slot, network_connection_profile);
+}
+
+void ChargePoint::on_websocket_connection_failed(ocpp::ConnectionFailedReason reason) {
+    this->charge_point->on_websocket_connection_failed(reason);
 }
 
 void ChargePoint::call_set_connection_timeout() {
@@ -136,9 +168,10 @@ void ChargePoint::on_transaction_started(const std::int32_t& connector, const st
 void ChargePoint::on_transaction_stopped(const std::int32_t connector, const std::string& session_id,
                                          const Reason& reason, ocpp::DateTime timestamp, float energy_wh_import,
                                          std::optional<CiString<20>> id_tag_end,
-                                         std::optional<std::string> signed_meter_value) {
+                                         std::optional<std::string> signed_meter_value,
+                                         std::optional<std::string> start_signed_meter_value) {
     this->charge_point->on_transaction_stopped(connector, session_id, reason, timestamp, energy_wh_import, id_tag_end,
-                                               signed_meter_value);
+                                               signed_meter_value, start_signed_meter_value);
 }
 
 void ChargePoint::on_suspend_charging_ev(std::int32_t connector, const std::optional<CiString<50>> info) {
@@ -170,8 +203,10 @@ void ChargePoint::on_log_status_notification(std::int32_t request_id, std::strin
 }
 
 void ChargePoint::on_firmware_update_status_notification(std::int32_t request_id,
-                                                         const FirmwareStatusNotification firmware_update_status) {
-    this->charge_point->on_firmware_update_status_notification(request_id, firmware_update_status);
+                                                         const FirmwareStatusNotification firmware_update_status,
+                                                         const bool disable_connectors_during_install) {
+    this->charge_point->on_firmware_update_status_notification(request_id, firmware_update_status,
+                                                               disable_connectors_during_install);
 }
 
 void ChargePoint::on_reservation_start(std::int32_t connector) {
@@ -285,6 +320,11 @@ void ChargePoint::register_set_connection_timeout_callback(
     this->charge_point->register_set_connection_timeout_callback(callback);
 }
 
+void ChargePoint::register_configure_network_connection_profile_callback(
+    ConfigureNetworkConnectionProfileCallback callback) {
+    this->charge_point->register_configure_network_connection_profile_callback(std::move(callback));
+}
+
 void ChargePoint::register_is_reset_allowed_callback(const std::function<bool(const ResetType& reset_type)>& callback) {
     this->charge_point->register_is_reset_allowed_callback(callback);
 }
@@ -365,6 +405,10 @@ void ChargePoint::register_session_cost_callback(
 void ChargePoint::register_tariff_message_callback(
     const std::function<DataTransferResponse(const TariffMessage& message)>& tariff_message_callback) {
     this->charge_point->register_tariff_message_callback(tariff_message_callback);
+}
+
+void ChargePoint::register_default_price_callback(const std::function<void(const TariffMessage& message)>& callback) {
+    this->charge_point->register_default_price_callback(callback);
 }
 
 void ChargePoint::register_set_display_message_callback(

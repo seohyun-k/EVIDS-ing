@@ -316,17 +316,29 @@ bool sha_512(const void* data, std::size_t len, sha_512_digest_t& digest) {
 }
 
 std::vector<std::uint8_t> base64_decode(const char* text, std::size_t len) {
-    assert(text != nullptr);
-    assert(len > 0);
-
-    // remove \n
+    // Strip whitespace; pass everything else to BIO_f_base64. Byte set matches
+    // EVP_Decode*'s B64_WS table so this stays drop-in equivalent to the
+    // evse_security path (consolidation target). NUL terminates the scan: an
+    // embedded NUL almost certainly indicates a length-parameter error and
+    // continuing would feed garbage to the decoder.
     auto input = std::make_unique<std::uint8_t[]>(len);
     std::size_t input_len{0};
 
     for (std::size_t i = 0; i < len; i++) {
         const auto item = text[i];
-        if (item != '\n') {
-            input.get()[input_len++] = item;
+        if (item == '\0') {
+            break;
+        }
+        switch (item) {
+        case '\t':
+        case '\n':
+        case '\v':
+        case '\f':
+        case '\r':
+        case ' ':
+            continue;
+        default:
+            input.get()[input_len++] = static_cast<std::uint8_t>(item);
         }
     }
 
@@ -370,9 +382,6 @@ bool base64_decode(const char* text, std::size_t len, std::uint8_t* out_data, st
 }
 
 std::string base64_encode(const std::uint8_t* data, std::size_t len, bool newLine) {
-    assert(data != nullptr);
-    assert(len > 0);
-
     auto* b64 = BIO_new(BIO_f_base64());
     auto* mem = BIO_new(BIO_s_mem());
     BIO_push(b64, mem);
@@ -824,6 +833,43 @@ bool certificate_sha_1(openssl::sha_1_digest_t& digest, const X509* cert) {
     }
 
     return bResult;
+}
+
+bool is_tls_1_3(const std::uint8_t* in, std::size_t inlen) {
+    // supported_versions extension payload (RFC 8446 4.2.1):
+    // first byte is the length of the version list, followed by
+    // two-byte version IDs (e.g. TLS 1.3 = 0x0304).
+    //
+    // Byte 1   -> length
+    // Byte 2+3 -> first version  (e.g. 03 04)
+    // Byte 4+5 -> second version (e.g. 03 03)
+    // ...
+    bool result{false};
+
+    if (in != nullptr && inlen > 0) {
+        const std::uint8_t length_supported_versions = *(in++);
+        inlen -= 1;
+
+        if (length_supported_versions != inlen) {
+            log_error("length_supported_versions does not match remaining bytes");
+        } else if (length_supported_versions % 2 != 0) {
+            log_error("length_supported_versions is not divisible by 2");
+        } else {
+            for (std::size_t i = 0; i < length_supported_versions; i += 2) {
+                const std::uint8_t first_byte = *(in++);
+                const std::uint8_t second_byte = *(in++);
+
+                const auto tls_version = static_cast<int>(first_byte) << 8 | second_byte;
+
+                if (tls_version == TLS1_3_VERSION) {
+                    result = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    return result;
 }
 
 bool certificate_subject_public_key_sha_1(openssl::sha_1_digest_t& digest, const X509* cert) {

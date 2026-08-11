@@ -233,6 +233,7 @@ private:
     take_signed_meter_data(std::optional<types::units_signed::SignedMeterValue>& data);
 
     bool stop_charging_on_fatal_error_internal();
+    std::string stop_reason_flags(bool fatal_error = false);
     float get_max_current_internal();
     float get_max_current_signalled_to_ev_internal();
     bool deauthorize_internal();
@@ -254,7 +255,6 @@ private:
 
     void process_cp_events_independent(CPEvent cp_event);
     void process_cp_events_state(CPEvent cp_event);
-    void run_state_machine();
 
     void main_thread();
     void error_thread();
@@ -281,6 +281,31 @@ private:
     // This mutex locks all variables related to the state machine
     Everest::timed_mutex_traceable state_machine_mutex;
 
+    /// Extension of the std::atomic_bool to allow to connect it to a signal and
+    /// fire on change.
+    struct SignalingBool : private std::atomic_bool {
+        using std::atomic_bool::atomic_bool;
+        using std::atomic_bool::operator bool;
+
+        /// @brief Signaling assign operator.
+        /// std::atomic_bool returns `bool` and not itself. See
+        /// https://en.cppreference.com/cpp/atomic/atomic/operator%3D
+        bool operator=(bool value) {
+            signal(value);
+            return std::atomic_bool::operator=(value);
+        }
+
+        /// @brief Register a new signal.
+        /// We just forward everything to signal's connect and let the compiler
+        /// complain if someone misuses.
+        template <typename... U> void set_signal(U&&... args) {
+            signal.connect(std::forward<U>(args)...);
+        }
+
+    private:
+        sigslot::signal<bool> signal;
+    };
+
     // used by different threads, complete main loop must be locked for write access
     struct SharedContext {
         // As per IEC61851-1 A.5.3
@@ -297,7 +322,7 @@ private:
             stop_transaction_id_token; // only set in case transaction was stopped locally
         types::authorization::ProvidedIdToken id_token;
         types::authorization::ValidationResult validation_result;
-        std::atomic_bool flag_authorized{false};
+        SignalingBool flag_authorized{false};
         std::atomic_bool flag_externally_cancelled{false};
         std::atomic_bool flag_paused_by_evse{false};
         std::atomic_bool flag_ev_plugged_in{false};
@@ -306,11 +331,15 @@ private:
         bool matching_started;
         float max_current;
         std::chrono::time_point<std::chrono::steady_clock> max_current_valid_until;
-        float max_current_cable{0.};
+        std::optional<double> max_current_cable;
         std::atomic_bool flag_transaction_active;
         bool session_active;
         std::string session_uuid;
         bool connector_enabled;
+        // Set when disable is requested while a session/transaction is active.
+        // Tells the state machine to transition to Disabled once the session is
+        // properly terminated instead of returning to Idle.
+        bool flag_disable_requested{false};
         EvseState current_state;
         std::optional<types::evse_manager::StopTransactionReason> last_stop_transaction_reason;
         types::evse_manager::StartSessionReason last_start_session_reason;
@@ -430,7 +459,6 @@ private:
     EventQueue<ErrorHandlingEvents> error_handling_event_queue;
 
     // constants
-    static constexpr float CHARGER_ABSOLUTE_MAX_CURRENT{1000.};
     constexpr static int LEGACY_WAKEUP_TIMEOUT{30000};
     constexpr static int PREPARING_TIMEOUT_PAUSED_BY_EV{10000};
     // valid Length of BCB toggles
@@ -471,6 +499,7 @@ private:
 
 protected:
     // provide access for unit tests
+    void run_state_machine();
     constexpr auto& get_shared_context() {
         return shared_context;
     }

@@ -27,6 +27,7 @@
 #include <evse_manager_fake.hpp>
 #include <evse_mock.hpp>
 #include <evse_security_mock.hpp>
+#include <limits>
 #include <ocpp/common/call_types.hpp>
 #include <ocpp/v2/evse.hpp>
 #include <ocpp/v2/ocpp_enums.hpp>
@@ -310,6 +311,96 @@ TEST_F(SmartChargingTest, K01FR35_IfChargingSchedulePeriodsAreNotInChonologicalO
     auto sut = smart_charging.validate_profile_schedules(profile);
 
     EXPECT_THAT(sut, testing::Eq(ProfileValidationResultEnum::ChargingSchedulePeriodsOutOfOrder));
+}
+
+TEST_F(SmartChargingTest, IfChargingSchedulePeriodLimitIsInfinity_ThenProfileIsInvalid) {
+    ChargingSchedulePeriod period;
+    period.startPeriod = 0;
+    period.limit = std::numeric_limits<float>::infinity();
+    auto profile = create_charging_profile(DEFAULT_PROFILE_ID, ChargingProfilePurposeEnum::TxProfile,
+                                           create_charge_schedule(ChargingRateUnitEnum::A, {period}), DEFAULT_TX_ID);
+
+    auto sut = smart_charging.validate_profile_schedules(profile);
+
+    EXPECT_THAT(sut, testing::Eq(ProfileValidationResultEnum::ChargingSchedulePeriodNonFiniteValue));
+}
+
+TEST_F(SmartChargingTest, IfChargingSchedulePeriodLimitIsNaN_ThenProfileIsInvalid) {
+    ChargingSchedulePeriod period;
+    period.startPeriod = 0;
+    period.limit = std::numeric_limits<float>::quiet_NaN();
+    auto profile = create_charging_profile(DEFAULT_PROFILE_ID, ChargingProfilePurposeEnum::TxProfile,
+                                           create_charge_schedule(ChargingRateUnitEnum::A, {period}), DEFAULT_TX_ID);
+
+    auto sut = smart_charging.validate_profile_schedules(profile);
+
+    EXPECT_THAT(sut, testing::Eq(ProfileValidationResultEnum::ChargingSchedulePeriodNonFiniteValue));
+}
+
+TEST_F(SmartChargingTest, IfChargingScheduleMinChargingRateIsInfinity_ThenProfileIsInvalid) {
+    auto schedule = create_charge_schedule(ChargingRateUnitEnum::A, create_charging_schedule_periods(0));
+    schedule.minChargingRate = std::numeric_limits<float>::infinity();
+    auto profile =
+        create_charging_profile(DEFAULT_PROFILE_ID, ChargingProfilePurposeEnum::TxProfile, schedule, DEFAULT_TX_ID);
+
+    auto sut = smart_charging.validate_profile_schedules(profile);
+
+    EXPECT_THAT(sut, testing::Eq(ProfileValidationResultEnum::ChargingScheduleNonFiniteValue));
+}
+
+TEST_F(SmartChargingTest, IfChargingSchedulePowerToleranceIsNaN_ThenProfileIsInvalid) {
+    auto schedule = create_charge_schedule(ChargingRateUnitEnum::A, create_charging_schedule_periods(0));
+    schedule.powerTolerance = std::numeric_limits<float>::quiet_NaN();
+    auto profile =
+        create_charging_profile(DEFAULT_PROFILE_ID, ChargingProfilePurposeEnum::TxProfile, schedule, DEFAULT_TX_ID);
+
+    auto sut = smart_charging.validate_profile_schedules(profile);
+
+    EXPECT_THAT(sut, testing::Eq(ProfileValidationResultEnum::ChargingScheduleNonFiniteValue));
+}
+
+TEST_F(SmartChargingTest, IfChargingScheduleLimitAtSoCIsInfinity_ThenProfileIsInvalid) {
+    auto schedule = create_charge_schedule(ChargingRateUnitEnum::A, create_charging_schedule_periods(0));
+    LimitAtSoC limit_at_soc;
+    limit_at_soc.soc = 80;
+    limit_at_soc.limit = std::numeric_limits<float>::infinity();
+    schedule.limitAtSoC = limit_at_soc;
+    auto profile =
+        create_charging_profile(DEFAULT_PROFILE_ID, ChargingProfilePurposeEnum::TxProfile, schedule, DEFAULT_TX_ID);
+
+    auto sut = smart_charging.validate_profile_schedules(profile);
+
+    EXPECT_THAT(sut, testing::Eq(ProfileValidationResultEnum::ChargingScheduleNonFiniteValue));
+}
+
+TEST_F(SmartChargingTest, IfV2XFreqWattCurveFrequencyIsInfinity_ThenProfileIsInvalid) {
+    ChargingSchedulePeriod period;
+    period.startPeriod = 0;
+    V2XFreqWattPoint point;
+    point.frequency = std::numeric_limits<float>::infinity();
+    point.power = 1000.0f;
+    period.v2xFreqWattCurve = {point};
+    auto profile = create_charging_profile(DEFAULT_PROFILE_ID, ChargingProfilePurposeEnum::TxProfile,
+                                           create_charge_schedule(ChargingRateUnitEnum::A, {period}), DEFAULT_TX_ID);
+
+    auto sut = smart_charging.validate_profile_schedules(profile);
+
+    EXPECT_THAT(sut, testing::Eq(ProfileValidationResultEnum::ChargingSchedulePeriodNonFiniteValue));
+}
+
+TEST_F(SmartChargingTest, IfV2XSignalWattCurvePowerIsNaN_ThenProfileIsInvalid) {
+    ChargingSchedulePeriod period;
+    period.startPeriod = 0;
+    V2XSignalWattPoint point;
+    point.signal = 0;
+    point.power = std::numeric_limits<float>::quiet_NaN();
+    period.v2xSignalWattCurve = {point};
+    auto profile = create_charging_profile(DEFAULT_PROFILE_ID, ChargingProfilePurposeEnum::TxProfile,
+                                           create_charge_schedule(ChargingRateUnitEnum::A, {period}), DEFAULT_TX_ID);
+
+    auto sut = smart_charging.validate_profile_schedules(profile);
+
+    EXPECT_THAT(sut, testing::Eq(ProfileValidationResultEnum::ChargingSchedulePeriodNonFiniteValue));
 }
 
 TEST_F(SmartChargingTest, K01_ValidateChargingStationMaxProfile_NotChargingStationMaxProfile_Invalid) {
@@ -1385,8 +1476,10 @@ TEST_F(SmartChargingTest, K10_ClearChargingProfile_ClearsId) {
     auto profiles = database_handler->get_all_charging_profiles();
     EXPECT_THAT(profiles, testing::Contains(profile));
 
-    auto sut = smart_charging.clear_profiles(create_clear_charging_profile_request(DEFAULT_PROFILE_ID));
+    std::vector<std::int32_t> cleared_ids;
+    auto sut = smart_charging.clear_profiles(create_clear_charging_profile_request(DEFAULT_PROFILE_ID), cleared_ids);
     EXPECT_THAT(sut.status, testing::Eq(ClearChargingProfileStatusEnum::Accepted));
+    EXPECT_THAT(cleared_ids, testing::ElementsAre(DEFAULT_PROFILE_ID));
 
     profiles = database_handler->get_all_charging_profiles();
     EXPECT_THAT(profiles, testing::Not(testing::Contains(profile)));
@@ -1398,10 +1491,14 @@ TEST_F(SmartChargingTest, K10_ClearChargingProfile_ClearsStackLevelPurposeCombin
     auto profiles = database_handler->get_all_charging_profiles();
     EXPECT_THAT(profiles, testing::Not(testing::IsEmpty()));
 
-    auto sut = smart_charging.clear_profiles(create_clear_charging_profile_request(
-        std::nullopt, create_clear_charging_profile(std::nullopt, ChargingProfilePurposeEnum::TxDefaultProfile,
-                                                    DEFAULT_STACK_LEVEL)));
+    std::vector<std::int32_t> cleared_ids;
+    auto sut = smart_charging.clear_profiles(
+        create_clear_charging_profile_request(
+            std::nullopt, create_clear_charging_profile(std::nullopt, ChargingProfilePurposeEnum::TxDefaultProfile,
+                                                        DEFAULT_STACK_LEVEL)),
+        cleared_ids);
     EXPECT_THAT(sut.status, testing::Eq(ClearChargingProfileStatusEnum::Accepted));
+    EXPECT_THAT(cleared_ids, testing::ElementsAre(DEFAULT_PROFILE_ID));
 
     profiles = database_handler->get_all_charging_profiles();
     EXPECT_THAT(profiles, testing::IsEmpty());
@@ -1413,10 +1510,14 @@ TEST_F(SmartChargingTest, K10_ClearChargingProfile_UnknownStackLevelPurposeCombi
     auto profiles = database_handler->get_all_charging_profiles();
     EXPECT_THAT(profiles, testing::Not(testing::IsEmpty()));
 
-    auto sut = smart_charging.clear_profiles(create_clear_charging_profile_request(
-        std::nullopt, create_clear_charging_profile(std::nullopt, ChargingProfilePurposeEnum::ChargingStationMaxProfile,
-                                                    STATION_WIDE_ID)));
+    std::vector<std::int32_t> cleared_ids;
+    auto sut = smart_charging.clear_profiles(
+        create_clear_charging_profile_request(
+            std::nullopt, create_clear_charging_profile(
+                              std::nullopt, ChargingProfilePurposeEnum::ChargingStationMaxProfile, STATION_WIDE_ID)),
+        cleared_ids);
     EXPECT_THAT(sut.status, testing::Eq(ClearChargingProfileStatusEnum::Unknown));
+    EXPECT_THAT(cleared_ids, testing::IsEmpty());
 
     profiles = database_handler->get_all_charging_profiles();
     EXPECT_THAT(profiles, testing::Not(testing::IsEmpty()));
@@ -1433,8 +1534,10 @@ TEST_F(SmartChargingTest, K10_ClearChargingProfile_UnknownId) {
     auto profiles = database_handler->get_all_charging_profiles();
     EXPECT_THAT(profiles, testing::Contains(profile));
 
-    auto sut = smart_charging.clear_profiles(create_clear_charging_profile_request(178));
+    std::vector<std::int32_t> cleared_ids;
+    auto sut = smart_charging.clear_profiles(create_clear_charging_profile_request(178), cleared_ids);
     EXPECT_THAT(sut.status, testing::Eq(ClearChargingProfileStatusEnum::Unknown));
+    EXPECT_THAT(cleared_ids, testing::IsEmpty());
 
     profiles = database_handler->get_all_charging_profiles();
     EXPECT_THAT(profiles, testing::Contains(profile));

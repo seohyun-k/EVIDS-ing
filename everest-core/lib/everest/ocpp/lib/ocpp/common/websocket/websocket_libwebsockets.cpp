@@ -130,7 +130,11 @@ struct ConnectionData {
     }
 
     /// \brief Requests the threads that are processing to exit as soon as possible
-    /// in a ordered manner
+    /// in a ordered manner.
+    /// Note: this only flips is_running (behind this->mutex); it does not wake the recv thread,
+    /// which waits on the recv_message_queue condition variable behind a different lock. Callers
+    /// must follow this with recv_message_queue notification (safe_close_threads() does so via
+    /// clear_all_queues()) or the recv thread only observes the interrupt on its next poll timeout.
     void do_interrupt_and_exit() {
         if (std::this_thread::get_id() == this->websocket_client_thread_id) {
             EVLOG_AND_THROW(std::runtime_error("Attempted to interrupt connection from websocket thread!"));
@@ -164,12 +168,20 @@ struct ConnectionData {
         return this->is_stopped_run;
     }
 
+    bool is_resetting() const {
+        return resetting.load(std::memory_order_acquire);
+    }
+
 public:
     /// \brief This should be used for a cleanup before calling the
     ///        init functions because releasing the unique ptrs has
     ///        as an effect the invocation of 'callback_minimal' during
     ///        '::lws_context_destroy(ptr);' and that causes a deadlock
     void reset_connection_data() {
+        // Signal that we are tearing down - callbacks fired during lws_context_destroy
+        // must be suppressed to avoid accessing invalidated state (wsi = nullptr)
+        resetting.store(true, std::memory_order_release);
+
         // Destroy them outside the lock scope
         std::unique_ptr<SSL_CTX> clear_sec;
         std::unique_ptr<lws_context> clear_lws;
@@ -197,6 +209,7 @@ public:
 
         // Reset the close status
         is_stopped_run = false;
+        resetting.store(false, std::memory_order_release);
 
         // Causes a deadlock in callback_minimal if not reset
         this->lws_ctx = std::unique_ptr<lws_context>(lws_ctx);
@@ -240,6 +253,7 @@ private:
     bool is_running;
     bool is_stopped_run;
     EConnectionState state;
+    std::atomic_bool resetting{false};
 
     std::mutex mutex;
 
@@ -421,6 +435,11 @@ int callback_minimal(struct lws* wsi, enum lws_callback_reasons reason, void* us
     if (wsi != nullptr) {
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): needed for appropriate type
         if (auto* data = reinterpret_cast<ConnectionData*>(lws_wsi_user(wsi))) {
+            // During lws_context_destroy, callbacks fire but connection state is inconsistent
+            // (wsi set to nullptr, context being freed). Suppress all callbacks during this phase.
+            if (data->is_resetting()) {
+                return 0;
+            }
             auto* owner = data->get_owner();
             if (owner not_eq nullptr) {
                 return owner->process_callback(wsi, static_cast<int>(reason), user, in, len);
@@ -595,7 +614,11 @@ void WebsocketLibwebsockets::thread_websocket_message_recv_loop(std::shared_ptr<
         // if we receive a certain message type that will cause the implementation
         // in the charge point to attempt a reconnect (BasicAuthPass for example)
         if (!local_data->is_interupted()) {
-            recv_message_queue.wait_on_queue_element(1s);
+            // Wake immediately when interrupted: the interrupt flag lives behind a different lock, so
+            // without this predicate a teardown that races the thread into the wait is only observed
+            // when the poll times out, stalling disconnect() for the poll interval.
+            recv_message_queue.wait_on_queue_element_or_predicate([&local_data] { return local_data->is_interupted(); },
+                                                                  1s);
         }
     }
 
@@ -628,7 +651,9 @@ bool WebsocketLibwebsockets::initialize_connection_options(std::shared_ptr<Conne
 
     // Lifetime of this is important since we use the data from this in private_key_callback()
     std::optional<std::string> private_key_password;
-    SSL_CTX* ssl_ctx = nullptr;
+    // Owned via RAII so it is freed on every early-return path; ownership is moved into
+    // ConnectionData only on the success path below.
+    std::unique_ptr<SSL_CTX> ssl_ctx;
 
     if (this->connection_options.security_profile == 2 || this->connection_options.security_profile == 3) {
         // Setup context - need to know the key type first
@@ -662,7 +687,7 @@ bool WebsocketLibwebsockets::initialize_connection_options(std::shared_ptr<Conne
 
         OpenSSLProvider provider;
         const SSL_METHOD* method = SSLv23_client_method();
-        ssl_ctx = SSL_CTX_new_ex(provider, provider.propquery_default(), method);
+        ssl_ctx.reset(SSL_CTX_new_ex(provider, provider.propquery_default(), method));
 
         if (ssl_ctx == nullptr) {
             ERR_print_errors_fp(stderr);
@@ -673,17 +698,17 @@ bool WebsocketLibwebsockets::initialize_connection_options(std::shared_ptr<Conne
         if (this->connection_options.enable_tls_keylog and this->connection_options.keylog_file.has_value()) {
             EVLOG_info << "Logging TLS secrets to: " << this->connection_options.keylog_file.value().string();
             keylog_file = this->connection_options.keylog_file;
-            SSL_CTX_set_keylog_callback(ssl_ctx, keylog_callback);
+            SSL_CTX_set_keylog_callback(ssl_ctx.get(), keylog_callback);
         }
 
         // Init TLS data
-        if (!tls_init(ssl_ctx, path_chain, path_key, private_key_password)) {
+        if (!tls_init(ssl_ctx.get(), path_chain, path_key, private_key_password)) {
             EVLOG_error << "Unable to init tls security options for websocket";
             return false;
         }
 
         // Setup our context
-        info.provided_client_ssl_ctx = ssl_ctx;
+        info.provided_client_ssl_ctx = ssl_ctx.get();
     }
 
     lws_context* lws_ctx = lws_create_context(&info);
@@ -693,7 +718,7 @@ bool WebsocketLibwebsockets::initialize_connection_options(std::shared_ptr<Conne
     }
 
     // Conn acquire the lws context and security context
-    new_connection_data->init_connection_context(lws_ctx, ssl_ctx);
+    new_connection_data->init_connection_context(lws_ctx, ssl_ctx.release());
     return true;
 }
 
@@ -702,7 +727,7 @@ void WebsocketLibwebsockets::thread_websocket_client_loop(std::shared_ptr<Connec
         EVLOG_AND_THROW(std::runtime_error("Null 'ConnectionData' in client thread, fatal error!"));
     }
 
-    EVLOG_info << "Init client loop with ID: " << std::hex << std::this_thread::get_id();
+    EVLOG_debug << "Init client loop with ID: " << std::hex << std::this_thread::get_id();
     bool try_reconnect = true;
 
     do {
@@ -797,8 +822,9 @@ void WebsocketLibwebsockets::thread_websocket_client_loop(std::shared_ptr<Connec
                     }
                 } while (n >= 0 && processing);
             }
-            // After this point no minimal_callback can be called, we have finished
-            // using the connection information and we will recreate it if required
+            // After exiting the lws_service loop, reset_connection_data() will destroy
+            // the lws_context. Callbacks fired during destruction are suppressed by the
+            // 'resetting' flag in ConnectionData.
             local_data->reset_connection_data();
             // free memory allocated by strdup() earlier on
             free(const_cast<char*>(i.address));
@@ -814,9 +840,7 @@ void WebsocketLibwebsockets::thread_websocket_client_loop(std::shared_ptr<Connec
         } else if (local_data->get_state() != EConnectionState::CONNECTED) {
             // Any other failure than a successful connect
 
-            // -1 indicates to always attempt to reconnect
-            if (this->connection_options.max_connection_attempts == -1 or
-                this->connection_attempts <= this->connection_options.max_connection_attempts) {
+            if (this->should_reconnect()) {
                 local_data->update_state(EConnectionState::RECONNECTING);
                 reconnect_delay = this->get_reconnect_interval();
                 try_reconnect = true;
@@ -839,13 +863,17 @@ void WebsocketLibwebsockets::thread_websocket_client_loop(std::shared_ptr<Connec
         if (local_data->get_state() == EConnectionState::RECONNECTING) {
             auto end_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(reconnect_delay);
 
-            while ((std::chrono::steady_clock::now() < end_time) && (false == local_data->is_interupted())) {
+            // Exit the wait early on interrupt or if reconnect gets suppressed mid-wait, so a
+            // suppress_reconnect() landing during the backoff cancels the scheduled re-dial. Only
+            // suppression is re-checked here: the attempt budget cannot change during the wait.
+            while ((std::chrono::steady_clock::now() < end_time) && (false == local_data->is_interupted()) &&
+                   (false == this->reconnect_suppressed)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
-            if (true == local_data->is_interupted()) {
+            if (local_data->is_interupted() || this->reconnect_suppressed) {
                 try_reconnect = false;
-                EVLOG_info << "Interrupred reconnect attempt, not reconnecting!";
+                EVLOG_info << "Interrupted or suppressed reconnect attempt, not reconnecting!";
             } else {
                 EVLOG_info << "Attempting reconnect after a wait of: " << reconnect_delay << "ms";
             }
@@ -954,6 +982,10 @@ bool WebsocketLibwebsockets::start_connecting() {
     // Clear shutting down so we allow to reconnect again as well
     this->shutting_down = false;
 
+    // A fresh connect is the single point that clears any reconnect suppression armed before a
+    // reset, mirroring the connection_attempts reset below.
+    this->clear_reconnect_suppression();
+
     EVLOG_info << "Starting connection attempts to uri: " << this->connection_options.csms_uri.string()
                << " with security-profile " << this->connection_options.security_profile
                << (this->connection_options.use_tpm_tls ? " with TPM keys" : "");
@@ -1011,6 +1043,10 @@ void WebsocketLibwebsockets::close_internal(const WebsocketCloseReason code, con
     if (!trying_connecting) {
         EVLOG_warning << "Trying to close inactive websocket with code: " << (int)code << " and reason: " << reason
                       << ", returning";
+        // The client loop can self-exit once reconnect attempts are exhausted, leaving its worker
+        // threads finished but still joinable. Join them here so a later close or destruction cannot
+        // destroy a joinable std::thread and terminate.
+        safe_close_threads();
         return;
     }
 
@@ -1711,6 +1747,11 @@ void WebsocketLibwebsockets::on_conn_writable() {
 void WebsocketLibwebsockets::push_deferred_callback(const std::function<void()>& callback) {
     if (!callback) {
         EVLOG_error << "Attempting to push stale callback in deferred queue!";
+        return;
+    }
+
+    if (this->stop_deferred_handler.load()) {
+        EVLOG_debug << "Deferred handler is stopping, dropping callback";
         return;
     }
 

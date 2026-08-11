@@ -21,7 +21,7 @@ message_20::AuthorizationSetupResponse handle_request(const message_20::Authoriz
 
     auto res = message_20::AuthorizationSetupResponse(); // default mandatory values [V2G20-736]
 
-    if (validate_and_setup_header(res.header, session, req.header.session_id) == false) {
+    if (not validate_and_setup_header(res.header, session, req.header.session_id)) {
         return response_with_code(res, dt::ResponseCode::FAILED_UnknownSession);
     }
 
@@ -31,7 +31,7 @@ message_20::AuthorizationSetupResponse handle_request(const message_20::Authoriz
         logf_warning("authorization_services was not set. Setting EIM as auth_mode");
         res.authorization_services = {dt::Authorization::EIM};
     } else {
-        res.authorization_services = authorization_services;
+        res.authorization_services = everest::lib::util::fixed_vector<dt::Authorization, 2>(authorization_services);
     }
 
     session.offered_services.auth_services = res.authorization_services;
@@ -54,7 +54,7 @@ message_20::AuthorizationSetupResponse handle_request(const message_20::Authoriz
 }
 
 void AuthorizationSetup::enter() {
-    m_ctx.log.enter_state("AuthorizationSetup");
+    logf_debug("Enter state: AuthorizationSetup");
 }
 
 Result AuthorizationSetup::feed(Event ev) {
@@ -90,7 +90,7 @@ Result AuthorizationSetup::feed(Event ev) {
 
         return {};
     } else {
-        m_ctx.log("expected AuthorizationSetupReq! But code type id: %d", variant->get_type());
+        logf_warning("Expected AuthorizationSetupReq! But code type id: %d", variant->get_type());
 
         // Sequence Error
         const message_20::Type req_type = variant->get_type();

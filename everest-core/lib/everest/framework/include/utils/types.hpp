@@ -21,7 +21,7 @@ using Value = json;
 using Parameters = json;
 using Result = std::optional<json>;
 using JsonCommand = std::function<json(json)>;
-using Command = std::function<Result(Parameters)>;
+using Command = std::function<Result(const Parameters&)>;
 using ArgumentType = std::vector<std::string>;
 using Arguments = std::map<std::string, ArgumentType>;
 using ReturnType = std::vector<std::string>;
@@ -64,13 +64,6 @@ struct TypedHandler {
 
 using Token = std::shared_ptr<TypedHandler>;
 
-/// \brief MQTT Quality of service
-enum class QOS {
-    QOS0, ///< At most once delivery
-    QOS1, ///< At least once delivery
-    QOS2  ///< Exactly once delivery
-};
-
 struct ModuleInfo {
     struct Paths {
         std::filesystem::path etc;
@@ -104,13 +97,15 @@ enum class MqttMessageType {
 };
 
 std::string mqtt_message_type_to_string(MqttMessageType type);
-MqttMessageType string_to_mqtt_message_type(const std::string& str);
+MqttMessageType string_to_mqtt_message_type(std::string_view str);
 
 struct MqttMessagePayload {
     MqttMessageType type; ///< The type of the MQTT message
     json data;            ///< The data of the MQTT message
     MqttMessagePayload() = delete;
-    MqttMessagePayload(MqttMessageType type_, json data_) : type(type_), data(std::move(data_)){};
+    template <typename T, typename = typename std::enable_if<std::is_convertible<T, json>::value>::type>
+    MqttMessagePayload(MqttMessageType type_, T&& data_) : type(type_), data(std::forward<T>(data_)) {
+    }
 };
 
 /// \brief Contains everything that's needed to initialize a requirement in user code
@@ -167,6 +162,7 @@ NLOHMANN_JSON_NAMESPACE_END
 
 namespace Everest {
 inline constexpr int mqtt_get_config_timeout_ms = 5000;
+inline constexpr std::size_t mqtt_get_config_retries = 1;
 
 /// \brief Errors than can happen related to commands
 enum class CmdErrorType {
@@ -187,6 +183,13 @@ struct CmdResultError {
 struct CmdResult {
     std::optional<json> result;
     std::optional<CmdResultError> error;
+};
+
+/// \brief MQTT Quality of service
+enum class QOS {
+    QOS0, ///< At most once delivery
+    QOS1, ///< At least once delivery
+    QOS2  ///< Exactly once delivery
 };
 
 struct MQTTRequest {

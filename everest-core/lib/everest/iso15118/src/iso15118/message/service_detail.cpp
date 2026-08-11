@@ -11,6 +11,10 @@
 namespace iso15118::message_20 {
 
 namespace datatypes {
+
+ParameterSet::ParameterSet(uint16_t _id) : id(_id), parameter({datatypes::Parameter{"", false}}) {
+}
+
 ParameterSet::ParameterSet(uint16_t _id, const AcParameterList& list) : id(_id) {
     parameter.push_back({"Connector", static_cast<int32_t>(list.connector)});
     parameter.push_back({"ControlMode", static_cast<int32_t>(list.control_mode)});
@@ -36,6 +40,19 @@ ParameterSet::ParameterSet(uint16_t _id, const AcBptParameterList& list) : id(_i
     parameter.push_back({"BPTChannel", static_cast<int32_t>(list.bpt_channel)});
     parameter.push_back({"GeneratorMode", static_cast<int32_t>(list.generator_mode)});
     parameter.push_back({"DetectionMethodGridCodeIslanding", static_cast<int32_t>(list.grid_code_detection_method)});
+}
+
+ParameterSet::ParameterSet(uint16_t _id, const AcDerParameterList& list) : id(_id) {
+    parameter.push_back({"Connector", static_cast<int32_t>(list.connector)});
+    parameter.push_back({"ControlMode", static_cast<int32_t>(list.control_mode)});
+    parameter.push_back({"EVSENominalVoltage", static_cast<int32_t>(list.evse_nominal_voltage)});
+    if (list.control_mode == ControlMode::Scheduled) {
+        parameter.push_back({"MobilityNeedsMode", static_cast<int32_t>(MobilityNeedsMode::ProvidedByEvcc)});
+    } else {
+        parameter.push_back({"MobilityNeedsMode", static_cast<int32_t>(list.mobility_needs_mode)});
+    }
+    parameter.push_back({"Pricing", static_cast<int32_t>(list.pricing)});
+    parameter.push_back({"DERControlFunctions", static_cast<int32_t>(list.der_control_functions.to_ulong())});
 }
 
 ParameterSet::ParameterSet(uint16_t _id, const DcParameterList& list) {

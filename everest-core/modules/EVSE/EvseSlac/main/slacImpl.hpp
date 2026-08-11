@@ -8,7 +8,10 @@
 // template version 3
 //
 
+#include "fsm_controller.hpp"
+#include <everest/slac/io.hpp>
 #include <generated/interfaces/slac/Implementation.hpp>
+#include <slac/slac.hpp>
 
 #include "../EvseSlac.hpp"
 
@@ -37,6 +40,7 @@ struct Conf {
     bool reset_instead_of_fail;
     int startup_delay_ms;
     int slac_init_timeout_ms;
+    bool hack_disable_regenerate_key_on_reset;
 };
 
 class slacImpl : public slacImplBase {
@@ -70,7 +74,9 @@ private:
     virtual void ready() override;
 
     // ev@3370e4dd-95f4-47a9-aaec-ea76f34a66c9:v1
-    void run();
+    slac::fsm::evse::Context fsm_ctx;
+    SlacIO slac_io;
+    std::unique_ptr<FSMController> fsm_ctrl{nullptr};
     // ev@3370e4dd-95f4-47a9-aaec-ea76f34a66c9:v1
 };
 

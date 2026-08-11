@@ -33,7 +33,8 @@ struct cmd {
     ReturnType return_type; ///< The return type
 };
 
-using TelemetryEntry = std::variant<std::string, const char*, bool, int32_t, uint32_t, int64_t, uint64_t, double>;
+using TelemetryEntry =
+    std::variant<std::string, const char*, bool, int32_t, uint32_t, int64_t, uint64_t, double, nlohmann::json>;
 using TelemetryMap = std::map<std::string, TelemetryEntry>;
 using UnsubscribeToken = std::function<void()>;
 
@@ -59,6 +60,8 @@ public:
             std::shared_ptr<MQTTAbstraction> mqtt_abstraction, const std::string& telemetry_prefix,
             bool telemetry_enabled, bool forward_exceptions = false);
 
+    ~Everest();
+
     // forbid copy assignment and copy construction
     // NOTE (aw): move assignment and construction are also not supported because we're creating explicit references to
     // our instance due to callback registration
@@ -80,12 +83,12 @@ public:
     /// \brief Provides functionality for calling commands of other modules. The module is identified by the given \p
     /// req, the command by the given command name \p cmd_name and the needed arguments by \p args
     ///
-    nlohmann::json call_cmd(const Requirement& req, const std::string& cmd_name, json args);
+    nlohmann::json call_cmd(const Requirement& req, const std::string& cmd_name, const nlohmann::json& args);
 
     ///
     /// \brief Publishes a variable of the given \p impl_id, names \p var_name with the given \p value
     ///
-    void publish_var(const std::string& impl_id, const std::string& var_name, nlohmann::json value);
+    void publish_var(const std::string& impl_id, const std::string& var_name, const nlohmann::json& value);
 
     ///
     /// \brief Subscribes to a variable of another module identified by the given \p req and variable name \p
@@ -130,9 +133,9 @@ public:
     std::shared_ptr<config::ConfigServiceClient> get_config_service_client() const;
 
     ///
-    /// \brief publishes the given \p data on the given \p topic
+    /// \brief publishes the given \p data on the given \p topic with the given \p retain
     ///
-    void external_mqtt_publish(const std::string& topic, const std::string& data);
+    void external_mqtt_publish(const std::string& topic, const std::string& data, bool retain);
 
     ///
     /// \brief Allows a module to indicate that it provides a external mqtt \p handler at the given \p topic
@@ -200,6 +203,17 @@ public:
     void register_on_ready_handler(const std::function<void()>& handler);
 
     ///
+    /// \brief registers a callback \p handler that is called when the global shutdown signal is received via mqtt
+    ///
+    /// Receiving the shutdown signal stops all module communication: after the registered handler
+    /// has returned, the MQTT connection is disconnected, so no further variable publications or
+    /// command calls are sent or received. Commands still waiting for their result at that point
+    /// fail with a Shutdown exception. Commands invoked from within the handler itself are still
+    /// processed normally. An empty \p handler is ignored.
+    ///
+    void register_on_shutdown_handler(const std::function<void()>& handler);
+
+    ///
     /// \brief  Blocks until ready is processed;
     ///
     void ensure_ready() const;
@@ -220,9 +234,12 @@ private:
     std::map<std::string, std::set<std::string>> registered_cmds;
     std::atomic<bool> ready_received;
     std::atomic<bool> ready_processed;
+    std::atomic<bool> shutdown_received;
+    std::atomic<bool> shutdown_processed;
     std::chrono::seconds remote_cmd_res_timeout;
     bool validate_data_with_schema;
     std::unique_ptr<std::function<void()>> on_ready;
+    std::unique_ptr<std::function<void()>> on_shutdown;
     std::thread heartbeat_thread;
     std::string module_name;
     std::shared_future<void> main_loop_end{};
@@ -237,6 +254,8 @@ private:
     bool forward_exceptions;
 
     void handle_ready(const nlohmann::json& data);
+
+    void handle_shutdown(const nlohmann::json& data);
 
     void heartbeat();
 

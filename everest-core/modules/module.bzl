@@ -1,4 +1,5 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@rules_python//python:defs.bzl", "py_library")
 
 # Rules for building Everest modules
 
@@ -8,6 +9,7 @@ def cc_everest_module(
     deps = [],
     impls = [],
     data = [],
+    includes = [],
     **cc_binary_kwargs
 ):
     """
@@ -23,13 +25,9 @@ def cc_everest_module(
             content of mainifest.yaml file.
         data: List of data files that should be available at runtime.
     """
-    impl_srcs = native.glob([
-        "{}/*.cpp".format(impl)
-        for impl in impls
-    ] + [
-        "{}/*.hpp".format(impl)
-        for impl in impls
-    ])
+    impl_srcs = []
+    for impl in impls:
+        impl_srcs += native.glob(["{}/*.cpp".format(impl), "{}/*.hpp".format(impl)])
 
     module_srcs = [
         name + ".cpp",
@@ -39,7 +37,7 @@ def cc_everest_module(
     binary = name + "__binary"
     manifest = native.glob(["manifest.y*ml"], allow_empty = False)[0]
 
-    prefix = native.package_name().replace("modules/", "").replace(name, "")
+    prefix = native.package_name().removeprefix("modules/")
 
     native.genrule(
         name = "ld-ev",
@@ -50,7 +48,6 @@ def cc_everest_module(
         srcs = [
             manifest,
             "//lib/everest/framework/schemas:schemas",
-            "//lib/everest/framework:dependencies.yaml",
             "@everest-core//types:types",
             "@everest-core//:MODULE.bazel",
             "@everest-core//interfaces:interfaces",
@@ -61,11 +58,10 @@ def cc_everest_module(
         cmd = """
     $(location //applications/utils/ev-dev-tools:ev-cli) module generate-loader \
         --work-dir `dirname $(location @everest-core//:MODULE.bazel)` \
-        --everest-dir ~/foo \
-        --schemas-dir `dirname $(location //lib/everest/framework:dependencies.yaml)`/schemas \
+        --schemas-dir `dirname $(location @everest-core//:MODULE.bazel)`/lib/everest/framework/schemas \
         --disable-clang-format \
         --output-dir `dirname $(location generated/modules/{module_name}/ld-ev.hpp)`/.. \
-        {prefix}{module_name}
+        {prefix}
     """.format(module_name = name, prefix = prefix)
     )
 
@@ -83,7 +79,7 @@ def cc_everest_module(
         includes = [
             ".",
             "generated/modules/" + name,
-        ],
+        ] + includes,
         visibility = ["//visibility:public"],
         # See https://github.com/HowardHinnant/date/issues/324
         local_defines = [
@@ -108,11 +104,62 @@ def cc_everest_module(
               "cp $(location {}) $(RULEDIR)/{}/".format(manifest, name),
     )
 
+    # `data` entries given as plain (package-relative) paths -- e.g.
+    # `glob(["models/**"])` -- are runtime files that the framework loads from
+    # the module's share directory at runtime (`share/everest/modules/<name>/`,
+    # see everest_env.bzl and runtime.cpp). We stage them into the module
+    # subdir next to the manifest, preserving their relative path, so the env
+    # rule can place them deterministically. Entries that are targets
+    # (`:foo`, `//pkg`, `@repo//...`) are left untouched.
+    data_targets = [d for d in data if d.startswith((":", "//", "@"))]
+    data_files = [d for d in data if d not in data_targets]
+    data_subdir = []
+    if data_files:
+        data_subdir = ["{}/{}".format(name, f) for f in data_files]
+        native.genrule(
+            name = "copy_data_to_subdir",
+            srcs = data_files,
+            outs = data_subdir,
+            cmd = " && ".join([
+                ("mkdir -p $$(dirname $(RULEDIR)/{name}/{f}) && " +
+                 "cp $(location {f}) $(RULEDIR)/{name}/{f}").format(name = name, f = f)
+                for f in data_files
+            ]),
+        )
+
     native.filegroup(
         name = name,
         srcs = [
             ":copy_to_subdir",
-        ] + data,  # Include data files in the filegroup
+        ] + data_subdir + data_targets,  # Stage runtime files into the module subdir
         data = [":" + binary],  # Include the binary to get its runfiles
+        visibility = ["//visibility:public"],
+    )
+
+def py_everest_module(
+        name,
+        deps = [],
+        interfaces_deps = [],
+        types_deps = [],
+        visibility = None):
+    """Creates a Python-based Module for EVerest.
+
+    Package where this macro is used should contain a directory with the same name as the module.
+    All Python Files from that folder would be included in the module.
+    The `manifest.yaml` file from that module would be used as manifest for the module.
+    """
+    py_library(
+        name = name,
+        srcs = native.glob(["**/*.py"]),
+        data = ["manifest.yaml"] + interfaces_deps + types_deps,
+        deps = deps + ["@everest-core//lib/everest/framework/everestpy/src:framework"],
+        visibility = ["//visibility:public"],
+    )
+    native.filegroup(
+        name = "{}_bundle".format(name),
+        srcs = [
+            ":{}".format(name),
+            "manifest.yaml".format(name)
+        ],
         visibility = ["//visibility:public"],
     )

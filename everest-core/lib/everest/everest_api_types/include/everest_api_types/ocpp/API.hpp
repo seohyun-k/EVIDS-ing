@@ -168,6 +168,27 @@ struct StatusInfoType {
     std::optional<std::string> additional_info;
 };
 
+enum class OperationalStatusEnumType {
+    Inoperative,
+    Operative,
+};
+
+enum class ChangeAvailabilityStatusEnumType {
+    Accepted,
+    Rejected,
+    Scheduled,
+};
+
+struct ChangeAvailabilityRequest {
+    OperationalStatusEnumType operational_status;
+    std::optional<EVSE> evse;
+};
+
+struct ChangeAvailabilityResponse {
+    ChangeAvailabilityStatusEnumType status;
+    std::optional<StatusInfoType> status_info;
+};
+
 struct BootNotificationResponse {
     RegistrationStatus status;
     std::string current_time;
@@ -254,6 +275,17 @@ struct ChargingSchedule {
 
 struct ChargingSchedules {
     std::vector<ChargingSchedule> schedules;
+};
+
+enum class MessageDirection {
+    CSMSToChargingStation,
+    ChargingStationToCSMS,
+};
+
+struct Message {
+    std::string message;
+    MessageDirection direction;
+    std::optional<std::string> version;
 };
 
 } // namespace everest::lib::API::V1_0::types::ocpp

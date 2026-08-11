@@ -2,6 +2,8 @@
 // Copyright 2020 - 2026 Pionix GmbH and Contributors to EVerest
 
 #include "everest/io/mdns/mdns.hpp"
+#include <arpa/inet.h>
+#include <cstring>
 #include <iostream>
 namespace everest::lib::io::mdns {
 
@@ -38,9 +40,23 @@ std::string parse_name(const std::uint8_t* buffer, int size, int* offset) {
 }
 
 void parse_mdns_A(const std::uint8_t* buffer, mDNS_discovery& mdns) {
-    auto size_of_ip_string = 16;
-    mdns.ip.resize(size_of_ip_string);
-    std::snprintf(mdns.ip.data(), mdns.ip.size(), "%d.%d.%d.%d", buffer[0], buffer[1], buffer[2], buffer[3]);
+    // 0.0.0.0 is the "no IPv4" filler of older announcers; treat it as absent so
+    // select_address() can fall through to an AAAA-provided address.
+    static constexpr std::uint8_t unspecified[4]{};
+    if (std::memcmp(buffer, unspecified, sizeof(unspecified)) == 0) {
+        return;
+    }
+    char addr_str[INET_ADDRSTRLEN]{};
+    if (inet_ntop(AF_INET, buffer, addr_str, sizeof(addr_str))) {
+        mdns.ip = addr_str;
+    }
+}
+
+void parse_mdns_AAAA(const std::uint8_t* buffer, mDNS_discovery& mdns) {
+    char addr_str[INET6_ADDRSTRLEN]{};
+    if (inet_ntop(AF_INET6, buffer, addr_str, sizeof(addr_str))) {
+        mdns.ipv6 = addr_str;
+    }
 }
 
 void parse_mdns_SRV(const std::uint8_t* base, int record_data_offset, mDNS_discovery& mdns, int size) {
@@ -79,6 +95,45 @@ void parse_mdns_PTR(const std::uint8_t* base, int record_data_offset, mDNS_disco
     mdns.service_instance = service_instance;
 }
 
+void encode_dns_name(std::vector<std::uint8_t>& packet, std::string const& name) {
+    std::size_t start = 0;
+    std::size_t end;
+    while ((end = name.find('.', start)) != std::string::npos) {
+        auto label_len = end - start;
+        if (label_len > 63) {
+            label_len = 63;
+        }
+        packet.push_back(static_cast<std::uint8_t>(label_len));
+        for (std::size_t i = start; i < start + label_len; ++i) {
+            packet.push_back(static_cast<std::uint8_t>(name[i]));
+        }
+        start = end + 1;
+    }
+    if (start < name.length()) {
+        auto label_len = name.length() - start;
+        if (label_len > 63) {
+            label_len = 63;
+        }
+        packet.push_back(static_cast<std::uint8_t>(label_len));
+        for (std::size_t i = start; i < start + label_len; ++i) {
+            packet.push_back(static_cast<std::uint8_t>(name[i]));
+        }
+    }
+    packet.push_back(0);
+}
+
+void append_uint16(std::vector<std::uint8_t>& packet, std::uint16_t value) {
+    packet.push_back(static_cast<std::uint8_t>((value >> 8) & 0xFF));
+    packet.push_back(static_cast<std::uint8_t>(value & 0xFF));
+}
+
+void append_uint32(std::vector<std::uint8_t>& packet, std::uint32_t value) {
+    packet.push_back(static_cast<std::uint8_t>((value >> 24) & 0xFF));
+    packet.push_back(static_cast<std::uint8_t>((value >> 16) & 0xFF));
+    packet.push_back(static_cast<std::uint8_t>((value >> 8) & 0xFF));
+    packet.push_back(static_cast<std::uint8_t>(value & 0xFF));
+}
+
 } // namespace
 
 [[maybe_unused]] std::optional<mDNS_discovery> parse_mdns_packet(std::vector<std::uint8_t> const& packet) {
@@ -115,9 +170,15 @@ void parse_mdns_PTR(const std::uint8_t* base, int record_data_offset, mDNS_disco
         std::uint16_t type = (buf[curr] << 8) | buf[curr + 1];
         std::uint16_t rdlen = (buf[curr + 8] << 8) | buf[curr + 9];
         curr += mdns_record_header_size;
+        // The header only declares rdlen; a truncated packet may carry fewer bytes.
+        if (curr + rdlen > size) {
+            break;
+        }
 
         if (type == 0x01 && rdlen == 4) {
             parse_mdns_A(buf + curr, result);
+        } else if (type == 0x1C && rdlen == 16) {
+            parse_mdns_AAAA(buf + curr, result);
         } else if (type == 0x21) {
             parse_mdns_SRV(buf, curr, result, size);
         } else if (type == 0x10) {
@@ -195,11 +256,16 @@ bool mDNS_registry::update(const mDNS_discovery& update) {
     something_new = apply_value(update.port, item.port) || something_new;
     something_new = apply_value(update.hostname, item.hostname) || something_new;
     something_new = apply_value(update.ip, item.ip) || something_new;
+    something_new = apply_value(update.ipv6, item.ipv6) || something_new;
 
     for (auto const& [key, val] : update.txt) {
         something_new = apply_value(val, item.txt[key]) || something_new;
     }
     return something_new;
+}
+
+void mDNS_registry::remove(const std::string& instance) {
+    data.erase(instance);
 }
 
 void mDNS_registry::clear() {
@@ -208,6 +274,162 @@ void mDNS_registry::clear() {
 
 mDNS_registry::registry const& mDNS_registry::get() {
     return data;
+}
+
+[[maybe_unused]] std::vector<std::uint8_t> create_mdns_response(mDNS_discovery const& service,
+                                                                std::string const& service_type) {
+    std::string const service_enum_fqdn = "_services._dns-sd._udp.local";
+    std::string service_fqdn = service_type + ".local";
+    std::string instance_fqdn = service.service_instance;
+    if (instance_fqdn.empty()) {
+        instance_fqdn = service.hostname + "." + service_fqdn;
+    }
+    std::string host_fqdn = service.hostname + ".local";
+
+    // A/AAAA are only emitted for a valid raw address of the respective family (no %scope, no
+    // brackets); an IPv6-only service must not announce a 0.0.0.0 A record, since receivers
+    // prefer the A address and would try to connect to it.
+    struct in_addr addr4;
+    bool const has_v4 = not service.ip.empty() && inet_pton(AF_INET, service.ip.c_str(), &addr4) == 1;
+    struct in6_addr addr6;
+    bool const has_v6 = not service.ipv6.empty() && inet_pton(AF_INET6, service.ipv6.c_str(), &addr6) == 1;
+
+    std::vector<std::uint8_t> packet;
+    append_uint16(packet, 0x0000); // Transaction ID
+    append_uint16(packet, 0x8400); // Flags: response, authoritative
+    append_uint16(packet, 0x0000); // Questions
+    // Answer RRs (enum PTR + PTR + SRV + TXT [+ A] [+ AAAA])
+    append_uint16(packet, static_cast<std::uint16_t>(4 + has_v4 + has_v6));
+    append_uint16(packet, 0x0000); // Authority RRs
+    append_uint16(packet, 0x0000); // Additional RRs
+
+    auto const default_ttl = static_cast<std::uint32_t>(120);
+
+    // DNS-SD enumeration PTR: _services._dns-sd._udp.local -> service_fqdn
+    encode_dns_name(packet, service_enum_fqdn);
+    append_uint16(packet, 0x000C);
+    append_uint16(packet, 0x0001);
+    append_uint32(packet, default_ttl);
+    std::vector<std::uint8_t> enum_ptr_rdata;
+    encode_dns_name(enum_ptr_rdata, service_fqdn);
+    append_uint16(packet, static_cast<std::uint16_t>(enum_ptr_rdata.size()));
+    packet.insert(packet.end(), enum_ptr_rdata.begin(), enum_ptr_rdata.end());
+
+    // PTR record: service_type.local -> instance_fqdn
+    encode_dns_name(packet, service_fqdn);
+    append_uint16(packet, 0x000C);
+    append_uint16(packet, 0x0001);
+    append_uint32(packet, default_ttl);
+    std::vector<std::uint8_t> ptr_rdata;
+    encode_dns_name(ptr_rdata, instance_fqdn);
+    append_uint16(packet, static_cast<std::uint16_t>(ptr_rdata.size()));
+    packet.insert(packet.end(), ptr_rdata.begin(), ptr_rdata.end());
+
+    // SRV record: instance_fqdn -> host:port
+    encode_dns_name(packet, instance_fqdn);
+    append_uint16(packet, 0x0021);
+    append_uint16(packet, 0x8001);
+    append_uint32(packet, default_ttl);
+    std::vector<std::uint8_t> srv_rdata;
+    append_uint16(srv_rdata, 0x0000); // Priority
+    append_uint16(srv_rdata, 0x0000); // Weight
+    append_uint16(srv_rdata, service.port);
+    encode_dns_name(srv_rdata, host_fqdn);
+    append_uint16(packet, static_cast<std::uint16_t>(srv_rdata.size()));
+    packet.insert(packet.end(), srv_rdata.begin(), srv_rdata.end());
+
+    // TXT record: instance_fqdn -> key=value pairs
+    encode_dns_name(packet, instance_fqdn);
+    append_uint16(packet, 0x0010);
+    append_uint16(packet, 0x8001);
+    append_uint32(packet, default_ttl);
+    std::vector<std::uint8_t> txt_rdata;
+    for (auto const& [key, val] : service.txt) {
+        std::string entry = key + "=" + val;
+        txt_rdata.push_back(static_cast<std::uint8_t>(entry.size()));
+        for (char ch : entry) {
+            txt_rdata.push_back(static_cast<std::uint8_t>(ch));
+        }
+    }
+    if (txt_rdata.empty()) {
+        txt_rdata.push_back(0);
+    }
+    append_uint16(packet, static_cast<std::uint16_t>(txt_rdata.size()));
+    packet.insert(packet.end(), txt_rdata.begin(), txt_rdata.end());
+
+    // A record: host_fqdn -> IPv4
+    if (has_v4) {
+        encode_dns_name(packet, host_fqdn);
+        append_uint16(packet, 0x0001);
+        append_uint16(packet, 0x8001);
+        append_uint32(packet, default_ttl);
+        append_uint16(packet, 0x0004);
+        auto const* bytes4 = reinterpret_cast<std::uint8_t const*>(&addr4.s_addr);
+        packet.insert(packet.end(), bytes4, bytes4 + 4);
+    }
+
+    // AAAA record: host_fqdn -> IPv6
+    if (has_v6) {
+        encode_dns_name(packet, host_fqdn);
+        append_uint16(packet, 0x001C);
+        append_uint16(packet, 0x8001);
+        append_uint32(packet, default_ttl);
+        append_uint16(packet, 0x0010);
+        auto const* bytes6 = reinterpret_cast<std::uint8_t const*>(addr6.s6_addr);
+        packet.insert(packet.end(), bytes6, bytes6 + 16);
+    }
+
+    return packet;
+}
+
+std::string select_address(mDNS_discovery const& info) {
+    return info.ip.empty() ? info.ipv6 : info.ip;
+}
+
+bool is_link_local_v6(std::string const& addr) {
+    auto const scope_pos = addr.find('%');
+    auto const raw = scope_pos == std::string::npos ? addr : addr.substr(0, scope_pos);
+    struct in6_addr parsed {};
+    if (inet_pton(AF_INET6, raw.c_str(), &parsed) != 1) {
+        return false;
+    }
+    return IN6_IS_ADDR_LINKLOCAL(&parsed);
+}
+
+[[maybe_unused]] bool is_query_for(std::vector<std::uint8_t> const& packet, std::string const& service_type) {
+    int size = static_cast<int>(packet.size());
+    auto const* buf = packet.data();
+    auto const mdns_packet_min_size = 12;
+    if (size < mdns_packet_min_size) {
+        return false;
+    }
+
+    if ((buf[2] & 0x80) != 0) {
+        return false;
+    }
+
+    std::size_t questions = (buf[4] << 8) | buf[5];
+    if (questions == 0) {
+        return false;
+    }
+
+    int curr = mdns_packet_min_size;
+    std::string const service_enum_fqdn = "_services._dns-sd._udp.local";
+    std::string service_fqdn = service_type + ".local";
+
+    for (std::size_t i = 0; i < questions && curr < size; ++i) {
+        std::string qname = parse_name(buf, size, &curr);
+        if (curr + 4 > size) {
+            break;
+        }
+        std::uint16_t qtype = (buf[curr] << 8) | buf[curr + 1];
+        curr += 4;
+
+        if ((qtype == 0x0C || qtype == 0xFF) && (qname == service_fqdn || qname == service_enum_fqdn)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace everest::lib::io::mdns

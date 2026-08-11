@@ -6,6 +6,7 @@
 
 #include <Charger.hpp>
 #include <memory>
+#include <optional>
 
 namespace {
 using namespace module;
@@ -19,6 +20,7 @@ struct ChargerDerived : public Charger {
     using Charger::Charger;
     using Charger::get_enable_disable_source_table;
     using Charger::get_shared_context;
+    using Charger::run_state_machine;
 
     // updated when a non-zero connector is used to enable_disable()
     constexpr const auto& connector_enabled() {
@@ -31,6 +33,10 @@ struct ChargerDerived : public Charger {
 
     constexpr void current_state(EvseState state) {
         get_shared_context().current_state = state;
+    }
+
+    constexpr const auto& flag_disable_requested() {
+        return get_shared_context().flag_disable_requested;
     }
 };
 
@@ -51,6 +57,7 @@ struct ChargerTest : public testing::Test {
     std::vector<std::unique_ptr<isolation_monitorIntf>> error_handler_imd;
     std::vector<std::unique_ptr<power_supply_DCIntf>> error_handler_powersupply;
     std::vector<std::unique_ptr<powermeterIntf>> error_handler_powermeter;
+    std::vector<std::unique_ptr<slacIntf>> error_handler_slac;
     std::vector<std::unique_ptr<over_voltage_monitorIntf>> error_handler_over_voltage_monitor;
 
     std::unique_ptr<ChargerDerived> charger;
@@ -59,7 +66,7 @@ struct ChargerTest : public testing::Test {
         charger_error_handling(std::make_unique<ErrorHandling>(
             error_handler_bsp, error_handler_hlc, error_handler_connector_lock, error_handler_ac_rcd,
             error_handler_evse, error_handler_imd, error_handler_powersupply, error_handler_powermeter,
-            error_handler_over_voltage_monitor, false)) {
+            error_handler_slac, error_handler_over_voltage_monitor, false)) {
     }
 
     void SetUp() override {
@@ -675,6 +682,85 @@ TEST_F(ChargerTest, DelayedAuthorizeAfterCancelTransactionIsIgnored) {
     EXPECT_TRUE(ctx.flag_externally_cancelled);
 }
 
+// Test that disabling while a transaction is active goes through the proper
+// StoppingCharging->Finished->Disabled sequence instead of jumping directly.
+TEST_F(ChargerTest, DisableDuringActiveTransaction) {
+    constexpr EnableDisableSource disable_source{Enable_source::CSMS, Enable_state::Disable, 100};
+
+    auto& ctx = charger->get_shared_context();
+
+    // Simulate an active charging session with contactors closed
+    ctx.current_state = Charger::EvseState::Charging;
+    ctx.flag_transaction_active = true;
+    ctx.session_active = true;
+    ctx.flag_authorized = true;
+    ctx.contactor_open = false;
+
+    reset_last_event();
+    EXPECT_FALSE(charger->enable_disable(1, disable_source));
+
+    // enable_disable calls run_state_machine synchronously: Charging->StoppingCharging.
+    // Must NOT immediately jump to Disabled — session needs proper teardown.
+    EXPECT_EQ(ctx.current_state, Charger::EvseState::StoppingCharging);
+    EXPECT_TRUE(charger->flag_disable_requested());
+    EXPECT_EQ(ctx.last_stop_transaction_reason, StopTransactionReason::EVSEDisabled);
+
+    // Simulate relay opening and transaction already stopped
+    ctx.contactor_open = true;
+    ctx.flag_transaction_active = false;
+
+    // State machine: StoppingCharging->Finished->Disabled (all in one loop)
+    reset_last_event();
+    charger->run_state_machine();
+    EXPECT_EQ(ctx.current_state, Charger::EvseState::Disabled);
+    EXPECT_EQ(last_event, SessionEventEnum::Disabled);
+}
+
+// Test that disabling while in WaitingForAuthentication (no transaction yet)
+// ends the session and transitions to Disabled without going through StoppingCharging.
+TEST_F(ChargerTest, DisableDuringWaitingForAuthentication) {
+    constexpr EnableDisableSource disable_source{Enable_source::CSMS, Enable_state::Disable, 100};
+
+    auto& ctx = charger->get_shared_context();
+
+    // Simulate EV plugged in, waiting for auth — no transaction started yet
+    ctx.current_state = Charger::EvseState::WaitingForAuthentication;
+    ctx.session_active = true;
+    ctx.flag_ev_plugged_in = true;
+    ctx.flag_transaction_active = false;
+    ctx.flag_authorized = false;
+
+    reset_last_event();
+    EXPECT_FALSE(charger->enable_disable(1, disable_source));
+
+    // run_state_machine is called synchronously inside enable_disable, so by
+    // the time enable_disable returns the state machine has already driven
+    // WaitingForAuthentication -> Finished -> Disabled.
+    EXPECT_EQ(ctx.current_state, Charger::EvseState::Disabled);
+    EXPECT_EQ(last_event, SessionEventEnum::Disabled);
+}
+
+// Test that disabling while in Idle (no session) immediately transitions to Disabled
+TEST_F(ChargerTest, DisableDuringIdle) {
+    constexpr EnableDisableSource disable_source{Enable_source::CSMS, Enable_state::Disable, 100};
+
+    auto& ctx = charger->get_shared_context();
+
+    // Simulate EV plugged in, no session active
+    ctx.current_state = Charger::EvseState::Idle;
+    ctx.session_active = false;
+    ctx.flag_ev_plugged_in = true;
+    ctx.flag_transaction_active = false;
+    ctx.flag_authorized = false;
+
+    reset_last_event();
+    EXPECT_FALSE(charger->enable_disable(1, disable_source));
+
+    // Must immediately transition to Disabled
+    EXPECT_EQ(ctx.current_state, Charger::EvseState::Disabled);
+    EXPECT_EQ(last_event, SessionEventEnum::Disabled);
+}
+
 } // namespace
 
 // ----------------------------------------------------------------------------
@@ -696,17 +782,17 @@ namespace module {
 
 // ----------------------------------------------------------------------------
 // IECStateMachine stub
-IECStateMachine::IECStateMachine(const std::unique_ptr<evse_board_supportIntf>& r_bsp_,
-                                 bool lock_connector_in_state_b_) :
+IECStateMachine::IECStateMachine(const std::unique_ptr<evse_board_supportIntf>& r_bsp_, bool lock_connector_in_state_b_,
+                                 bool use_authorized_) :
     r_bsp(r_bsp_) {
 }
-void IECStateMachine::process_bsp_event(const types::board_support_common::BspEvent bsp_event) {
+void IECStateMachine::process_bsp_event(const types::board_support_common::BspEvent& bsp_event) {
 }
 void IECStateMachine::allow_power_on(bool value, types::evse_board_support::Reason reason) {
 }
 
-double IECStateMachine::read_pp_ampacity() {
-    return 0.0;
+std::optional<double> IECStateMachine::read_pp_ampacity() {
+    return std::nullopt;
 }
 void IECStateMachine::switch_three_phases_while_charging(bool n) {
 }
@@ -727,6 +813,9 @@ void IECStateMachine::enable(bool en) {
 }
 
 void IECStateMachine::connector_force_unlock() {
+}
+
+void IECStateMachine::set_authorized(bool a) {
 }
 
 const std::string cpevent_to_string(CPEvent e) {
@@ -763,6 +852,7 @@ ErrorHandling::ErrorHandling(const std::unique_ptr<evse_board_supportIntf>& r_bs
                              const std::vector<std::unique_ptr<isolation_monitorIntf>>& _r_imd,
                              const std::vector<std::unique_ptr<power_supply_DCIntf>>& _r_powersupply,
                              const std::vector<std::unique_ptr<powermeterIntf>>& _r_powermeter,
+                             const std::vector<std::unique_ptr<slacIntf>>& _r_slac,
                              const std::vector<std::unique_ptr<over_voltage_monitorIntf>>& _r_over_voltage_monitor,
                              bool _inoperative_error_use_vendor_id) :
     r_bsp(r_bsp),
@@ -773,6 +863,7 @@ ErrorHandling::ErrorHandling(const std::unique_ptr<evse_board_supportIntf>& r_bs
     r_imd(_r_imd),
     r_powersupply(r_powersupply),
     r_powermeter(_r_powermeter),
+    r_slac(_r_slac),
     r_over_voltage_monitor(_r_over_voltage_monitor),
     inoperative_error_use_vendor_id(_inoperative_error_use_vendor_id) {
 }
@@ -823,7 +914,7 @@ SessionLog::~SessionLog() {
 
 void SessionLog::setPath(const std::string& path) {
 }
-void SessionLog::setMqtt(const std::function<void(nlohmann::json data)>& mqtt_provider) {
+void SessionLog::setMqtt(const std::function<void(const nlohmann::json& data)>& mqtt_provider) {
 }
 void SessionLog::enable() {
 }

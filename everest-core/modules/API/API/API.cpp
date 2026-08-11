@@ -2,8 +2,8 @@
 // Copyright 2020 - 2026 Pionix GmbH and Contributors to EVerest
 #include "API.hpp"
 #include <everest/external_energy_limits/external_energy_limits.hpp>
+#include <everest/utils/yaml_loader.hpp>
 #include <utils/date.hpp>
-#include <utils/yaml_loader.hpp>
 
 namespace module {
 
@@ -758,6 +758,13 @@ void API::ready() {
             std::this_thread::sleep_until(next_tick);
         }
     });
+}
+
+void API::shutdown() {
+    this->running = false;
+    for (auto& api_thread : this->api_threads) {
+        api_thread.join();
+    }
 }
 
 } // namespace module

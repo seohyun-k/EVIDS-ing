@@ -46,7 +46,7 @@ use backon::ConstantBuilder;
 use chrono::{Local, Offset, Utc};
 use everestrs::serde as everest_serde;
 use everestrs::serde_json as everest_serde_json;
-use generated::errors::powermeter::{Error, GenericError};
+use generated::errors::powermeter::{Error, PowermeterError};
 use generated::types::powermeter::{
     Powermeter, TransactionReq, TransactionRequestStatus, TransactionStartResponse,
     TransactionStopResponse,
@@ -54,7 +54,7 @@ use generated::types::powermeter::{
 use generated::types::serial_comm_hub_requests::{StatusCodeEnum, VectorUint16};
 use generated::types::units::{Current, Energy, Frequency, Power, ReactivePower, Voltage};
 use generated::types::units_signed::SignedMeterValue;
-use generated::{get_config, Module, ModuleConfig, SerialCommunicationHubClientPublisher};
+use generated::{Module, ModuleConfig, SerialCommunicationHubClientPublisher};
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -225,6 +225,7 @@ impl TransactionStartResponse {
             status: TransactionRequestStatus::UNEXPECTED_ERROR,
             transaction_max_stop_time: None,
             transaction_min_stop_time: None,
+            signed_meter_value: None,
         }
     }
 }
@@ -827,6 +828,7 @@ impl ReadyState {
             transaction_min_stop_time: Option::None,
             status: TransactionRequestStatus::OK,
             transaction_max_stop_time: Option::None,
+            signed_meter_value: Option::None,
         })
     }
 
@@ -1019,12 +1021,12 @@ impl generated::OnReadySubscriber for IskraMeter {
                         Err(e) => log::error!("Failed to post meter values {:?}", e),
                     }
                     power_meter_clone
-                        .clear_error(Error::Generic(GenericError::CommunicationFault));
+                        .clear_error(Error::Powermeter(PowermeterError::CommunicationFault));
                 }
                 Err(e) => {
                     log::error!("Failed to read meter value {:?}", e);
                     power_meter_clone
-                        .raise_error(Error::Generic(GenericError::CommunicationFault).into());
+                        .raise_error(Error::Powermeter(PowermeterError::CommunicationFault).into());
                 }
             };
             // Check the time status. In case of failure we just carry on.
@@ -1115,8 +1117,9 @@ impl generated::PowermeterServiceSubscriber for IskraMeter {
     }
 }
 
-fn main() {
-    let config = get_config();
+#[everestrs::main]
+fn main(module: &Module) {
+    let config = module.get_config();
     let class = Arc::new(IskraMeter {
         state_machine: Mutex::new(StateMachine::InitState(InitState::new(
             config.powermeter_device_id,
@@ -1128,7 +1131,7 @@ fn main() {
         read_meter_values_interval_ms: config.read_meter_values_interval_ms as u64,
     });
 
-    let _module = Module::new(class.clone(), class.clone(), class.clone());
+    let _publishers = module.start(class.clone(), class.clone(), class.clone());
 
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));

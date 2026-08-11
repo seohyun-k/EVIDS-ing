@@ -16,13 +16,6 @@
 #include <type_traits>
 #include <variant>
 
-#include <boost/log/attributes/attribute_value_set.hpp>
-#include <boost/log/attributes/constant.hpp>
-#include <boost/log/expressions/filter.hpp>
-#include <boost/log/utility/setup/filter_parser.hpp>
-#include <boost/log/utility/setup/settings.hpp>
-#include <boost/log/utility/setup/settings_parser.hpp>
-
 namespace {
 
 JsonBlob json2blob(const json& j) {
@@ -71,34 +64,26 @@ inline ConfigField get_config_field(const std::string& _name, int _value) {
 
 } // namespace
 
-/// @brief The flag which prevents us from re-initializing the module.
-std::once_flag mod_flag;
-
-/// @brief The central handle to the EVerest infrastructure.
-std::unique_ptr<Module> mod;
-
-const Module& create_module(rust::Str module_id, rust::Str prefix, rust::Str mqtt_broker_socket_path,
-                            rust::Str mqtt_broker_host, const unsigned int& mqtt_broker_port,
-                            rust::Str mqtt_everest_prefix, rust::Str mqtt_external_prefix) {
-    std::call_once(mod_flag, [&]() {
-        auto socket_path = std::string(mqtt_broker_socket_path);
-        Everest::MQTTSettings mqtt_settings;
-        if (not socket_path.empty()) {
-            Everest::populate_mqtt_settings(mqtt_settings, socket_path, std::string(mqtt_everest_prefix),
-                                            std::string(mqtt_external_prefix));
-        } else {
-            Everest::populate_mqtt_settings(mqtt_settings, std::string(mqtt_broker_host), mqtt_broker_port,
-                                            std::string(mqtt_everest_prefix), std::string(mqtt_external_prefix));
-        }
-        mod = std::make_unique<Module>(std::string(module_id), std::string(prefix), mqtt_settings);
-    });
-    return *mod;
+std::unique_ptr<Module> create_module(rust::Str module_id, rust::Str prefix, rust::Str mqtt_broker_socket_path,
+                                      rust::Str mqtt_broker_host, const std::uint16_t& mqtt_broker_port,
+                                      rust::Str mqtt_everest_prefix, rust::Str mqtt_external_prefix) {
+    auto socket_path = std::string(mqtt_broker_socket_path);
+    Everest::MQTTSettings mqtt_settings;
+    if (not socket_path.empty()) {
+        Everest::populate_mqtt_settings(mqtt_settings, socket_path, std::string(mqtt_everest_prefix),
+                                        std::string(mqtt_external_prefix));
+    } else {
+        Everest::populate_mqtt_settings(mqtt_settings, std::string(mqtt_broker_host), mqtt_broker_port,
+                                        std::string(mqtt_everest_prefix), std::string(mqtt_external_prefix));
+    }
+    return std::make_unique<Module>(std::string(module_id), std::string(prefix), mqtt_settings);
 }
 
 Module::Module(const std::string& module_id, const std::string& prefix, const Everest::MQTTSettings& mqtt_settings) :
     module_id_(module_id) {
 
-    const auto mqtt_abstraction = std::make_shared<Everest::MQTTAbstraction>(mqtt_settings);
+    const auto mqtt_abstraction =
+        std::shared_ptr<Everest::MQTTAbstraction>(Everest::make_mqtt_abstraction(mqtt_settings));
     // TODO(ddo) what happens when this returns false?
     mqtt_abstraction->connect();
     mqtt_abstraction->spawn_main_loop_thread();
@@ -117,6 +102,15 @@ Module::Module(const std::string& module_id, const std::string& prefix, const Ev
     handle_->spawn_main_loop_thread();
 }
 
+Module::~Module() {
+    // MQTTAbstractionImpl spawns a main loop thread whose only exit condition
+    // is `disconnect_event` being notified. Without this call the `Thread`
+    // member destructor joins a thread that will never exit.
+    if (handle_) {
+        handle_->disconnect();
+    }
+}
+
 JsonBlob Module::get_interface(rust::Str interface_name) const {
     const auto& interface_def = config_->get_interface_definition(std::string(interface_name));
     return json2blob(interface_def);
@@ -129,6 +123,8 @@ JsonBlob Module::get_manifest() const {
 
 void Module::signal_ready(const Runtime& rt) const {
     handle_->register_on_ready_handler([&rt]() { rt.on_ready(); });
+    // like the ready handler, the shutdown handler relies on the Runtime outliving the module
+    handle_->register_on_shutdown_handler([&rt]() { rt.on_shutdown(); });
     handle_->signal_ready();
 }
 
@@ -228,12 +224,28 @@ void Module::publish_variable(rust::Str implementation_id, rust::Str name, JsonB
 }
 
 void Module::raise_error(rust::Str implementation_id, ErrorType error_type) const {
+    // Here everything is called implementation_id: We have the Rust string type
+    // then we have its c++ counterpart as std::string. And then we have the
+    // ImplementationIdentifier type :S
+    const std::string impl_id = std::string(implementation_id);
+    const auto full_mapping = handle_->get_3_tier_model_mapping();
+    std::optional<Mapping> mapping;
+    if (full_mapping.has_value()) {
+        const auto& inner = *full_mapping;
+        mapping = inner.module;
+        // We might have multiple mappings. In this case we pick the
+        // implementation mapping is since this is more specific.
+        const auto impl_mapping_iter = inner.implementations.find(impl_id);
+        if (impl_mapping_iter != inner.implementations.end()) {
+            mapping = impl_mapping_iter->second;
+        }
+    }
+    const ImplementationIdentifier id{module_id_, impl_id, mapping};
     const Everest::error::Error error{std::string(error_type.error_type),
                                       std::string{},
                                       std::string(error_type.message),
                                       std::string(error_type.description),
-                                      module_id_,
-                                      std::string(implementation_id),
+                                      id,
                                       static_cast<Everest::error::Severity>(error_type.severity)};
     handle_->get_error_manager_impl(std::string(implementation_id))->raise_error(error);
 }
@@ -288,56 +300,13 @@ rust::Vec<RsModuleConfig> Module::get_module_configs(rust::Str module_id) const 
 }
 
 int init_logging(rust::Str module_id, rust::Str prefix, rust::Str logging_config_file) {
-    using namespace boost::log;
-    using namespace Everest::Logging;
-
     const std::string module_id_cpp{module_id};
-    const std::string prefix_cpp{prefix};
     const std::string logging_config_file_cpp{logging_config_file};
 
-    // Init the CPP logger.
-    init(logging_config_file_cpp, module_id_cpp);
-
-    // Below is something really ugly. Boost's log filter rules may actually be
-    // quite "complex" but the library does not expose any way to check the
-    // already installed filters. We therefore reopen the config and construct
-    // or own filter - and feed it with dummy values to determine its filtering
-    // behaviour (the lowest severity which is accepted by the filter)
-    std::filesystem::path logging_path{logging_config_file_cpp};
-    std::ifstream logging_config(logging_path.c_str());
-    if (!logging_config.is_open()) {
-        return info;
-    }
-    const auto settings = parse_settings(logging_config);
-
-    if (auto core_settings = settings["Core"]) {
-        if (boost::optional<std::string> param = core_settings["Filter"]) {
-
-            const auto filter = parse_filter(param.get());
-            // Check for the severity values - which is the first one to be
-            // accepted by the filter.
-            static_assert(static_cast<int>(verbose) == 0);
-            static_assert(static_cast<int>(error) == 4);
-            for (int ii = static_cast<int>(verbose); ii <= static_cast<int>(error); ++ii) {
-                attribute_set set1, set2, set3;
-                set1["Severity"] = attributes::constant<severity_level>{static_cast<severity_level>(ii)};
-
-                attribute_value_set value_set(set1, set2, set3);
-                value_set.freeze();
-
-                if (filter(value_set)) {
-                    return ii;
-                }
-            }
-        }
-    }
-
-    return info;
+    // // Init the CPP logger.
+    return Everest::Logging::init(logging_config_file_cpp, module_id_cpp);
 }
 
 void log2cxx(int level, int line, rust::Str file, rust::Str message) {
-    const auto logging_level = static_cast<::Everest::Logging::severity_level>(level);
-    BOOST_LOG_SEV(::global_logger::get(), logging_level)
-        << boost::log::BOOST_LOG_VERSION_NAMESPACE::add_value("file", std::string{file})
-        << boost::log::BOOST_LOG_VERSION_NAMESPACE::add_value("line", line) << std::string{message};
+    Everest::Logging::ffi_log(level, line, std::string(file), std::string(message));
 }

@@ -3,6 +3,7 @@
 #ifndef FRAMEWORK_EVEREST_RUNTIME_HPP
 #define FRAMEWORK_EVEREST_RUNTIME_HPP
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 
@@ -13,10 +14,10 @@
 #include <framework/ModuleAdapter.hpp>
 #include <utils/config/settings.hpp>
 #include <utils/module_config.hpp>
-#include <utils/yaml_loader.hpp>
 
 #include <everest/compile_time_settings.hpp>
 #include <everest/logging.hpp>
+#include <everest/utils/yaml_loader.hpp>
 
 namespace boost::program_options {
 class variables_map; // forward declaration
@@ -90,7 +91,7 @@ inline constexpr auto CONTROLLER_PORT = 8849;
 inline constexpr auto CONTROLLER_RPC_TIMEOUT_MS = 2000;
 inline constexpr auto MQTT_BROKER_SOCKET_PATH = "/tmp/mqtt_broker.sock";
 inline constexpr auto MQTT_BROKER_HOST = "localhost";
-inline constexpr auto MQTT_BROKER_PORT = 1883;
+inline constexpr std::uint16_t MQTT_BROKER_PORT = 1883;
 inline constexpr auto MQTT_EVEREST_PREFIX = "everest";
 inline constexpr auto MQTT_EXTERNAL_PREFIX = "";
 inline constexpr auto TELEMETRY_PREFIX = "everest-telemetry";
@@ -115,6 +116,7 @@ struct ModuleCallbacks {
     std::function<std::vector<cmd>(const RequirementInitialization& requirement_init)> everest_register;
     std::function<void(ModuleConfigs module_configs, const ModuleInfo& info)> init;
     std::function<void()> ready;
+    std::function<void()> shutdown;
 
     ModuleCallbacks() = default;
 
@@ -122,7 +124,7 @@ struct ModuleCallbacks {
         const std::function<void(ModuleAdapter module_adapter)>& register_module_adapter,
         const std::function<std::vector<cmd>(const RequirementInitialization& requirement_init)>& everest_register,
         const std::function<void(ModuleConfigs module_configs, const ModuleInfo& info)>& init,
-        const std::function<void()>& ready);
+        const std::function<void()>& ready, const std::function<void()>& shutdown = nullptr);
 };
 
 ///\brief Version information

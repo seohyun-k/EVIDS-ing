@@ -29,28 +29,45 @@ enum severity_level {
 };
 
 /// \brief Initialize a completely silenced logger
-void init();
+/// \return -1 for off.
+int init();
 
 /// \brief Initialize logger using the config pointed to by \p logconf
-void init(const std::string& logconf);
+/// \return minimum accepted severity level (-1=off, 0=verbose .. 5=critical)
+int init(const std::string& logconf);
 
 /// \brief Initialize logger using the config pointed to by \p logconf additionally setting the \p process_name
-void init(const std::string& logconf, std::string process_name);
+/// \return minimum accepted severity level (-1=off, 0=verbose .. 5=critical)
+int init(const std::string& logconf, std::string process_name);
+
+/// \brief Logging function for foreign language interfaces.
+void ffi_log(int level, int line, const std::string& file, const std::string& message);
 
 void update_process_name(std::string process_name);
 std::string trace();
 } // namespace Logging
 
+#ifdef EVEREST_DISABLE_VERBOSE_LOGGING
+#define EVLOG_verbose                                                                                                  \
+    if (true) {                                                                                                        \
+    } else                                                                                                             \
+        BOOST_LOG_SEV(::global_logger::get(), ::Everest::Logging::verbose)
+#else
 // clang-format off
 #define EVLOG_verbose                                                                                                  \
     BOOST_LOG_SEV(::global_logger::get(), ::Everest::Logging::verbose)                                                 \
         << boost::log::BOOST_LOG_VERSION_NAMESPACE::add_value("file", __FILE__)                                        \
         << boost::log::BOOST_LOG_VERSION_NAMESPACE::add_value("line", __LINE__)                                        \
         << boost::log::BOOST_LOG_VERSION_NAMESPACE::add_value("function", BOOST_CURRENT_FUNCTION)
+#endif
 
+#ifdef EVEREST_DISABLE_DEBUG_LOGGING
+#define EVLOG_debug if (true) {} else BOOST_LOG_SEV(::global_logger::get(), ::Everest::Logging::debug)
+#else
 #define EVLOG_debug                                                                                                    \
     BOOST_LOG_SEV(::global_logger::get(), ::Everest::Logging::debug)                                                   \
         << boost::log::BOOST_LOG_VERSION_NAMESPACE::add_value("function", BOOST_CURRENT_FUNCTION)
+#endif
 
 #define EVLOG_info                                                                                                     \
     BOOST_LOG_SEV(::global_logger::get(), ::Everest::Logging::info)

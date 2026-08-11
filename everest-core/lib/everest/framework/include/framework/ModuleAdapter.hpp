@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2020 - 2022 Pionix GmbH and Contributors to EVerest
+// Copyright 2020 - 2026 Pionix GmbH and Contributors to EVerest
 #ifndef MODULE_ADAPTER_HPP
 #define MODULE_ADAPTER_HPP
 
@@ -44,13 +44,16 @@ struct ModuleBase;
 class ImplementationBase {
 public:
     friend class ModuleAdapter; // for accessing gather_cmds
-    friend class ModuleBase;    // for accessing init & ready
+    friend class ModuleBase;    // for accessing init, ready & shutdown
     virtual ~ImplementationBase() = default;
 
 private:
     virtual void _gather_cmds(std::vector<cmd>&) = 0;
     virtual void init() = 0;
     virtual void ready() = 0;
+    virtual void shutdown() {
+        EVLOG_debug << "No shutdown handler installed! Please implement shutdown() in your implementation!";
+    }
 };
 
 class ModuleBase {
@@ -64,6 +67,17 @@ protected:
     void invoke_init(ImplementationBase& impl);
 
     void invoke_ready(ImplementationBase& impl);
+
+    void invoke_shutdown(ImplementationBase& impl) {
+        impl.shutdown();
+    }
+
+    /// Default when a module has not yet declared its own \c shutdown() (legacy generated headers).
+    /// Generated modules define a private \c shutdown() that calls \c invoke_shutdown() on each impl.
+    void shutdown() {
+        EVLOG_debug << "No shutdown handler installed! Please implement shutdown() in your module! (" << info.name
+                    << ")";
+    }
 };
 
 namespace error {
@@ -74,9 +88,9 @@ struct ErrorStateMonitor;
 struct ErrorFactory;
 } // namespace error
 struct ModuleAdapter {
-    using CallFunc = std::function<Result(const Requirement&, const std::string&, Parameters)>;
-    using PublishFunc = std::function<void(const std::string&, const std::string&, Value)>;
-    using SubscribeFunc = std::function<void(const Requirement&, const std::string&, ValueCallback)>;
+    using CallFunc = std::function<Result(const Requirement&, const std::string&, const Parameters&)>;
+    using PublishFunc = std::function<void(const std::string&, const std::string&, const Value&)>;
+    using SubscribeFunc = std::function<void(const Requirement&, const std::string&, const ValueCallback&)>;
     using GetErrorManagerImplFunc = std::function<std::shared_ptr<error::ErrorManagerImpl>(const std::string&)>;
     using GetErrorStateMonitorImplFunc = std::function<std::shared_ptr<error::ErrorStateMonitor>(const std::string&)>;
     using GetErrorFactoryFunc = std::function<std::shared_ptr<error::ErrorFactory>(const std::string&)>;
@@ -84,7 +98,7 @@ struct ModuleAdapter {
     using GetGlobalErrorManagerFunc = std::function<std::shared_ptr<error::ErrorManagerReqGlobal>()>;
     using GetGlobalErrorStateMonitorFunc = std::function<std::shared_ptr<error::ErrorStateMonitor>()>;
     using GetErrorStateMonitorReqFunc = std::function<std::shared_ptr<error::ErrorStateMonitor>(const Requirement&)>;
-    using ExtMqttPublishFunc = std::function<void(const std::string&, const std::string&)>;
+    using ExtMqttPublishFunc = std::function<void(const std::string&, const std::string&, bool)>;
     using ExtMqttSubscribeFunc = std::function<UnsubscribeToken(const std::string&, StringHandler)>;
     using ExtMqttSubscribePairFunc = std::function<UnsubscribeToken(const std::string&, StringPairHandler)>;
     using TelemetryPublishFunc =
@@ -119,17 +133,17 @@ class MqttProvider {
 public:
     MqttProvider(ModuleAdapter& ev);
 
-    void publish(const std::string& topic, const std::string& data);
+    void publish(const std::string& topic, const std::string& data, bool retain = false);
 
-    void publish(const std::string& topic, const char* data);
+    void publish(const std::string& topic, const char* data, bool retain = false);
 
-    void publish(const std::string& topic, bool data);
+    void publish(const std::string& topic, bool data, bool retain = false);
 
-    void publish(const std::string& topic, int data);
+    void publish(const std::string& topic, int data, bool retain = false);
 
-    void publish(const std::string& topic, double data, int precision);
+    void publish(const std::string& topic, double data, int precision, bool retain = false);
 
-    void publish(const std::string& topic, double data);
+    void publish(const std::string& topic, double data, bool retain = false);
 
     UnsubscribeToken subscribe(const std::string& topic, StringHandler handler) const;
 

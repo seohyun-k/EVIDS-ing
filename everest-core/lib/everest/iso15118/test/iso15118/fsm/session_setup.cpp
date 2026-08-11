@@ -7,6 +7,7 @@
 #include <iso15118/d20/state/authorization_setup.hpp>
 #include <iso15118/d20/state/session_setup.hpp>
 
+#include <iso15118/message/service_detail.hpp>
 #include <iso15118/message/session_setup.hpp>
 
 using namespace iso15118;
@@ -27,13 +28,28 @@ SCENARIO("ISO15118-20 session setup state transitions") {
     const std::vector<d20::ControlMobilityNeedsModes> control_mobility_modes = {
         {dt::ControlMode::Scheduled, dt::MobilityNeedsMode::ProvidedByEvcc}};
 
-    const d20::EvseSetupConfig evse_setup{
-        evse_id,   supported_energy_services, auth_services, vas_services, cert_install, dc_limits,
-        ac_limits, control_mobility_modes,    std::nullopt,  std::nullopt, std::nullopt, powersupply_limits};
+    const d20::EvseSetupConfig evse_setup{evse_id,
+                                          supported_energy_services,
+                                          auth_services,
+                                          vas_services,
+                                          cert_install,
+                                          dc_limits,
+                                          ac_limits,
+                                          std::nullopt,
+                                          control_mobility_modes,
+                                          std::nullopt,
+                                          std::nullopt,
+                                          std::nullopt,
+                                          std::nullopt,
+                                          powersupply_limits};
+
+    const bool skip_app_protocol_negotiation{false};
+    bool ev_information_called{false};
 
     std::optional<d20::PauseContext> pause_ctx{std::nullopt};
 
-    const session::feedback::Callbacks callbacks{};
+    session::feedback::Callbacks callbacks{};
+    callbacks.ev_information = [&ev_information_called](const d20::EVInformation&) { ev_information_called = true; };
 
     auto state_helper = FsmStateHelper(d20::SessionConfig(evse_setup), pause_ctx, callbacks);
     auto ctx = state_helper.get_context();
@@ -53,7 +69,7 @@ SCENARIO("ISO15118-20 session setup state transitions") {
 
     GIVEN("Good case - New session") {
 
-        fsm::v2::FSM<d20::StateBase> fsm{ctx.create_state<d20::state::SessionSetup>()};
+        fsm::v2::FSM<d20::StateBase> fsm{ctx.create_state<d20::state::SessionSetup>(skip_app_protocol_negotiation)};
 
         const auto header_req = message_20::Header{{0, 0, 0, 0, 0, 0, 0, 0}, 1691411798};
         const auto req = message_20::SessionSetupRequest{header_req, "WMIV1234567890ABCDEX"};
@@ -75,8 +91,44 @@ SCENARIO("ISO15118-20 session setup state transitions") {
         }
     }
 
+    GIVEN("Good case - New session, app protocol negotiation not skipped: ev_information is emitted") {
+        ev_information_called = false; // reset
+
+        fsm::v2::FSM<d20::StateBase> fsm{ctx.create_state<d20::state::SessionSetup>(false)};
+
+        const auto header_req = message_20::Header{{0, 0, 0, 0, 0, 0, 0, 0}, 1691411798};
+        const auto req = message_20::SessionSetupRequest{header_req, "WMIV1234567890ABCDEX"};
+
+        state_helper.handle_request(req);
+        const auto result = fsm.feed(d20::Event::V2GTP_MESSAGE);
+
+        THEN("Check state transition and that ev_information feedback is called") {
+            REQUIRE(result.transitioned() == true);
+            REQUIRE(fsm.get_current_state_id() == d20::StateID::AuthorizationSetup);
+            REQUIRE(ev_information_called == true);
+        }
+    }
+
+    GIVEN("Good case - New session, app protocol negotiation skipped: ev_information is not emitted") {
+        ev_information_called = false; // reset
+
+        fsm::v2::FSM<d20::StateBase> fsm{ctx.create_state<d20::state::SessionSetup>(true)};
+
+        const auto header_req = message_20::Header{{0, 0, 0, 0, 0, 0, 0, 0}, 1691411798};
+        const auto req = message_20::SessionSetupRequest{header_req, "WMIV1234567890ABCDEX"};
+
+        state_helper.handle_request(req);
+        const auto result = fsm.feed(d20::Event::V2GTP_MESSAGE);
+
+        THEN("Check state transition and that ev_information feedback is not called") {
+            REQUIRE(result.transitioned() == true);
+            REQUIRE(fsm.get_current_state_id() == d20::StateID::AuthorizationSetup);
+            REQUIRE(ev_information_called == false);
+        }
+    }
+
     GIVEN("Good case - resume old session") {
-        fsm::v2::FSM<d20::StateBase> fsm{ctx.create_state<d20::state::SessionSetup>()};
+        fsm::v2::FSM<d20::StateBase> fsm{ctx.create_state<d20::state::SessionSetup>(skip_app_protocol_negotiation)};
 
         ctx.set_new_vehicle_cert_hash(io::sha512_hash_t{
             0x3F, 0x66, 0xE4, 0x5F, 0x3A, 0x30, 0x3B, 0x8F, 0x47, 0xCD, 0xD6, 0x86, 0xAD, 0x75, 0x13, 0x6F,
@@ -107,7 +159,7 @@ SCENARIO("ISO15118-20 session setup state transitions") {
     }
 
     GIVEN("Try to resume old session with another session id") {
-        fsm::v2::FSM<d20::StateBase> fsm{ctx.create_state<d20::state::SessionSetup>()};
+        fsm::v2::FSM<d20::StateBase> fsm{ctx.create_state<d20::state::SessionSetup>(skip_app_protocol_negotiation)};
 
         ctx.set_new_vehicle_cert_hash(io::sha512_hash_t{
             0x3F, 0x66, 0xE4, 0x5F, 0x3A, 0x30, 0x3B, 0x8F, 0x47, 0xCD, 0xD6, 0x86, 0xAD, 0x75, 0x13, 0x6F,
@@ -139,7 +191,7 @@ SCENARIO("ISO15118-20 session setup state transitions") {
     }
 
     GIVEN("Try to resume old session with no vehicle cert hash") {
-        fsm::v2::FSM<d20::StateBase> fsm{ctx.create_state<d20::state::SessionSetup>()};
+        fsm::v2::FSM<d20::StateBase> fsm{ctx.create_state<d20::state::SessionSetup>(skip_app_protocol_negotiation)};
 
         const auto header_req = message_20::Header{session_id, 1691411798};
         const auto req = message_20::SessionSetupRequest{header_req, "WMIV1234567890ABCDEX"};
@@ -165,7 +217,7 @@ SCENARIO("ISO15118-20 session setup state transitions") {
     }
 
     GIVEN("Try to resume old session with different vehicle cert hash") {
-        fsm::v2::FSM<d20::StateBase> fsm{ctx.create_state<d20::state::SessionSetup>()};
+        fsm::v2::FSM<d20::StateBase> fsm{ctx.create_state<d20::state::SessionSetup>(skip_app_protocol_negotiation)};
 
         ctx.set_new_vehicle_cert_hash(io::sha512_hash_t{
             0x3F, 0x66, 0xE4, 0x5F, 0x3A, 0x30, 0x3B, 0x8F, 0x47, 0xCD, 0xD6, 0x86, 0xAD, 0x75, 0x13, 0x6F,
@@ -194,5 +246,30 @@ SCENARIO("ISO15118-20 session setup state transitions") {
         }
 
         pause_ctx.reset();
+    }
+
+    GIVEN("Sequence Error") {
+        fsm::v2::FSM<d20::StateBase> fsm{ctx.create_state<d20::state::SessionSetup>(skip_app_protocol_negotiation)};
+
+        const auto header_req = message_20::Header{d20::Session().get_id(), 1691411798};
+        const auto req =
+            message_20::ServiceDetailRequest{header_req, message_20::to_underlying_value(dt::ServiceCategory::DC)};
+
+        state_helper.handle_request(req);
+
+        const auto result = fsm.feed(d20::Event::V2GTP_MESSAGE);
+
+        THEN("Check state transition") {
+            REQUIRE(result.transitioned() == false);
+            REQUIRE(fsm.get_current_state_id() == d20::StateID::SessionSetup);
+
+            const auto response_message = ctx.get_response<message_20::ServiceDetailResponse>();
+            REQUIRE(response_message.has_value());
+
+            const auto& res = response_message.value();
+            REQUIRE(res.response_code == dt::ResponseCode::FAILED_SequenceError);
+            REQUIRE(res.service == message_20::to_underlying_value(dt::ServiceCategory::DC));
+            REQUIRE(res.service_parameter_list.size() == 1);
+        }
     }
 }

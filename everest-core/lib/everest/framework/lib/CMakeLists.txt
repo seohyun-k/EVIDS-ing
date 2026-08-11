@@ -36,10 +36,8 @@ target_sources(framework
         everest.cpp
         formatter.cpp
         filesystem.cpp
-        message_queue.cpp
         module_adapter.cpp
         module_config.cpp
-        mqtt_abstraction.cpp
         mqtt_abstraction_impl.cpp
         thread.cpp
         types.cpp
@@ -47,7 +45,6 @@ target_sources(framework
         status_fifo.cpp
         date.cpp
         runtime.cpp
-        yaml_loader.cpp
         message_handler.cpp
 )
 
@@ -64,6 +61,14 @@ target_include_directories(framework
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/everest>
 )
 
+if(EVEREST_FRAMEWORK_THREAD_POOL_SCALING_POLICY STREQUAL "custom" AND
+   EVEREST_FRAMEWORK_THREAD_POOL_SCALING_POLICY_CUSTOM_INCLUDE_DIR)
+    target_include_directories(framework
+        PUBLIC
+            $<BUILD_INTERFACE:${EVEREST_FRAMEWORK_THREAD_POOL_SCALING_POLICY_CUSTOM_INCLUDE_DIR}>
+    )
+endif()
+
 if(Boost_VERSION_STRING VERSION_LESS "1.69.0")
     set(EVEREST_FRAMEWORK_BOOST_SYSTEM_LINK_LIBRARY Boost::system)
 endif()
@@ -77,6 +82,9 @@ target_link_libraries(framework
 
         everest::log
         everest::sqlite
+        everest::yaml
+        $<BUILD_INTERFACE:everest_helpers>
+        $<INSTALL_INTERFACE:everest::helpers>
         $<BUILD_INTERFACE:everest_util>
         $<INSTALL_INTERFACE:everest::util>
         ${STD_FILESYSTEM_COMPAT_LIB}
@@ -84,8 +92,8 @@ target_link_libraries(framework
         ${EVEREST_FRAMEWORK_BOOST_SYSTEM_LINK_LIBRARY}
         Boost::thread
         Boost::program_options
-        mqttc
-        ryml::ryml
+        everest::io
+        ${ATOMIC_LIBS}
 )
 
 collect_migration_files(

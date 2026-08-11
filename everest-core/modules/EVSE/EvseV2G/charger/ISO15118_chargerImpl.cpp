@@ -3,9 +3,12 @@
 // Copyright (C) 2022-2023 Contributors to EVerest
 #include "ISO15118_chargerImpl.hpp"
 #include "log.hpp"
+#include "sdp.hpp"
+#include "telemetry_publisher.hpp"
 #include "tools.hpp"
 #include "v2g_ctx.hpp"
 #include <algorithm>
+#include <everest/util/misc/change_tracker.hpp>
 #include <string.h>
 #include <string_view>
 
@@ -13,6 +16,11 @@ const std::string CERTS_SUB_DIR = "certs"; // relativ path of the certs
 
 using namespace std::chrono_literals;
 using BidiMode = types::iso15118::SaeJ2847BidiMode;
+namespace telemetry_types = everest::lib::API::V1_0::types::telemetry;
+using V2gTransportTracker = everest::lib::util::change_tracker<telemetry_types::V2gTransport>;
+using V2gEvElectricalTracker = everest::lib::util::change_tracker<telemetry_types::V2gEvElectrical>;
+using V2gPaymentServiceTracker = everest::lib::util::change_tracker<telemetry_types::V2gPaymentService>;
+using V2gChargerStatusTracker = everest::lib::util::change_tracker<telemetry_types::V2gChargerStatus>;
 
 namespace module {
 namespace charger {
@@ -30,9 +38,11 @@ void ISO15118_chargerImpl::init() {
     /* Configure hlc_protocols */
     if (mod->config.supported_DIN70121 == true) {
         v2g_ctx->supported_protocols |= (1 << V2G_PROTO_DIN70121);
+        supp_app_protocols_secc.app_protocols.push_back(types::iso15118::SupportedAppProtocol::DIN70121);
     }
     if (mod->config.supported_ISO15118_2 == true) {
         v2g_ctx->supported_protocols |= (1 << V2G_PROTO_ISO15118_2013);
+        supp_app_protocols_secc.app_protocols.push_back(types::iso15118::SupportedAppProtocol::ISO15118D2);
     }
 
     /* Configure tls_security */
@@ -114,6 +124,7 @@ void ISO15118_chargerImpl::init() {
 }
 
 void ISO15118_chargerImpl::ready() {
+    publish_supported_app_protocols_secc(supp_app_protocols_secc);
 }
 
 void ISO15118_chargerImpl::handle_setup(types::iso15118::EVSEID& evse_id,
@@ -253,16 +264,27 @@ void ISO15118_chargerImpl::handle_bpt_setup(types::iso15118::BptSetup& bpt_confi
 }
 
 void ISO15118_chargerImpl::handle_set_powersupply_capabilities(types::power_supply_DC::Capabilities& capabilities) {
-    populate_physical_value_float(&v2g_ctx->evse_v2g_data.power_capabilities.max_current,
-                                  capabilities.max_export_current_A, 1, iso2_unitSymbolType_A);
-    populate_physical_value_float(&v2g_ctx->evse_v2g_data.power_capabilities.min_current,
-                                  capabilities.min_export_current_A, 1, iso2_unitSymbolType_A);
+
+    const auto max_export_current =
+        capabilities.nominal_max_export_current_A.value_or(capabilities.max_export_current_A);
+    const auto min_export_current =
+        capabilities.nominal_min_export_current_A.value_or(capabilities.min_export_current_A);
+    const auto max_export_power = capabilities.nominal_max_export_power_W.value_or(capabilities.max_export_power_W);
+    const auto max_export_voltage =
+        capabilities.nominal_max_export_voltage_V.value_or(capabilities.max_export_voltage_V);
+    const auto min_export_voltage =
+        capabilities.nominal_min_export_voltage_V.value_or(capabilities.min_export_voltage_V);
+
+    populate_physical_value_float(&v2g_ctx->evse_v2g_data.power_capabilities.max_current, max_export_current, 1,
+                                  iso2_unitSymbolType_A);
+    populate_physical_value_float(&v2g_ctx->evse_v2g_data.power_capabilities.min_current, min_export_current, 1,
+                                  iso2_unitSymbolType_A);
     populate_physical_value(&v2g_ctx->evse_v2g_data.power_capabilities.max_power,
-                            static_cast<uint32_t>(capabilities.max_export_power_W), iso2_unitSymbolType_W);
-    populate_physical_value_float(&v2g_ctx->evse_v2g_data.power_capabilities.max_voltage,
-                                  capabilities.max_export_voltage_V, 1, iso2_unitSymbolType_V);
-    populate_physical_value_float(&v2g_ctx->evse_v2g_data.power_capabilities.min_voltage,
-                                  capabilities.min_export_voltage_V, 1, iso2_unitSymbolType_V);
+                            static_cast<uint32_t>(max_export_power), iso2_unitSymbolType_W);
+    populate_physical_value_float(&v2g_ctx->evse_v2g_data.power_capabilities.max_voltage, max_export_voltage, 1,
+                                  iso2_unitSymbolType_V);
+    populate_physical_value_float(&v2g_ctx->evse_v2g_data.power_capabilities.min_voltage, min_export_voltage, 1,
+                                  iso2_unitSymbolType_V);
 }
 
 void ISO15118_chargerImpl::handle_authorization_response(
@@ -290,7 +312,8 @@ void ISO15118_chargerImpl::handle_ac_contactor_closed(bool& status) {
 }
 
 void ISO15118_chargerImpl::handle_dlink_ready(bool& value) {
-    // FIXME: dlink_ready(true) is ignored for now
+    sdp_set_dlink_ready(v2g_ctx, value);
+
     // If dlink becomes not ready (false), stop TCP connection in the read thread
     if (!value) {
         v2g_ctx->is_connection_terminated = true;
@@ -302,6 +325,12 @@ void ISO15118_chargerImpl::handle_cable_check_finished(bool& status) {
         v2g_ctx->evse_v2g_data.evse_processing[PHASE_ISOLATION] = (uint8_t)iso2_EVSEProcessingType_Finished;
     } else {
         v2g_ctx->evse_v2g_data.evse_processing[PHASE_ISOLATION] = (uint8_t)iso2_EVSEProcessingType_Ongoing;
+    }
+
+    if (v2g_ctx->telemetry_publisher) {
+        v2g_ctx->telemetry_publisher->update_charger_status([&](V2gChargerStatusTracker& charger_status) {
+            charger_status.set(&telemetry_types::V2gChargerStatus::cable_check_status, status);
+        });
     }
 }
 
@@ -360,6 +389,63 @@ void ISO15118_chargerImpl::handle_no_energy_pause_charging(types::iso15118::NoEn
         v2g_ctx->evse_v2g_data.no_energy_pause = NoEnergyPauseStatus::AllowEvToIgnorePause;
         break;
     }
+}
+
+bool ISO15118_chargerImpl::handle_update_supported_app_protocols(
+    types::iso15118::SupportedAppProtocols& supported_app_protocols) {
+    bool rv{true};
+    v2g_ctx->supported_protocols = 0;
+
+    if (supported_app_protocols.app_protocols.empty()) {
+        dlog(DLOG_LEVEL_WARNING, "No supported app protocols configured");
+        return true;
+    }
+
+    std::string configured_protocols;
+
+    for (const auto& protocol : supported_app_protocols.app_protocols) {
+        if (!configured_protocols.empty()) {
+            configured_protocols += ", ";
+        }
+        configured_protocols += types::iso15118::supported_app_protocol_to_string(protocol);
+    }
+
+    dlog(DLOG_LEVEL_INFO, "Configured charging protocols: [%s]", configured_protocols.c_str());
+
+    for (const auto& protocol : supported_app_protocols.app_protocols) {
+        // Check if the supported app protocol is in the SECC list
+        const bool allowed = std::find(this->supp_app_protocols_secc.app_protocols.begin(),
+                                       this->supp_app_protocols_secc.app_protocols.end(),
+                                       protocol) != this->supp_app_protocols_secc.app_protocols.end();
+
+        if (!allowed) {
+            dlog(DLOG_LEVEL_WARNING, "Skip unsupported app protocol: %s",
+                 types::iso15118::supported_app_protocol_to_string(protocol).c_str());
+            rv = false;
+            continue;
+        }
+        /* Configure supported app bitmask. This bitmark is used in the supportedAppHandshake handle
+           to select the protocol */
+        switch (protocol) {
+        case types::iso15118::SupportedAppProtocol::DIN70121:
+            v2g_ctx->supported_protocols |= (1 << V2G_PROTO_DIN70121);
+            break;
+        case types::iso15118::SupportedAppProtocol::ISO15118D2:
+            v2g_ctx->supported_protocols |= (1 << V2G_PROTO_ISO15118_2013);
+            break;
+        case types::iso15118::SupportedAppProtocol::ISO15118D20:
+        default:
+            dlog(DLOG_LEVEL_WARNING, "Unsupported app protocol: %s",
+                 types::iso15118::supported_app_protocol_to_string(protocol).c_str());
+            rv = false;
+        }
+    }
+
+    if (v2g_ctx->supported_protocols == 0) {
+        dlog(DLOG_LEVEL_WARNING, "No supported app protocols provided");
+        rv = false;
+    }
+    return rv;
 }
 
 void ISO15118_chargerImpl::handle_update_energy_transfer_modes(
@@ -485,6 +571,17 @@ void ISO15118_chargerImpl::handle_update_dc_maximum_limits(types::iso15118::DcEv
     populate_physical_value_float(&v2g_ctx->evse_v2g_data.evse_maximum_voltage_limit,
                                   maximum_limits.evse_maximum_voltage_limit, 1, iso2_unitSymbolType_V);
     v2g_ctx->evse_v2g_data.evse_maximum_voltage_limit_is_used = 1;
+
+    if (v2g_ctx->telemetry_publisher) {
+        v2g_ctx->telemetry_publisher->update_charger_status([&](V2gChargerStatusTracker& charger_status) {
+            charger_status.set_almost_eq<2>(&telemetry_types::V2gChargerStatus::dynamic_max_current_A,
+                                            maximum_limits.evse_maximum_current_limit);
+            charger_status.set_almost_eq<2>(&telemetry_types::V2gChargerStatus::dynamic_max_power_W,
+                                            maximum_limits.evse_maximum_power_limit);
+            charger_status.set_almost_eq<2>(&telemetry_types::V2gChargerStatus::dynamic_max_voltage_V,
+                                            maximum_limits.evse_maximum_voltage_limit);
+        });
+    }
 }
 
 void ISO15118_chargerImpl::handle_update_dc_minimum_limits(types::iso15118::DcEvseMinimumLimits& minimum_limits) {
@@ -500,6 +597,13 @@ void ISO15118_chargerImpl::handle_update_dc_minimum_limits(types::iso15118::DcEv
 void ISO15118_chargerImpl::handle_update_isolation_status(types::iso15118::IsolationStatus& isolation_status) {
     v2g_ctx->evse_v2g_data.evse_isolation_status = (uint8_t)isolation_status;
     v2g_ctx->evse_v2g_data.evse_isolation_status_is_used = 1;
+
+    if (v2g_ctx->telemetry_publisher) {
+        v2g_ctx->telemetry_publisher->update_charger_status([&](V2gChargerStatusTracker& charger_status) {
+            charger_status.set(&telemetry_types::V2gChargerStatus::isolation_status,
+                               types::iso15118::isolation_status_to_string(isolation_status));
+        });
+    }
 }
 
 void ISO15118_chargerImpl::handle_update_dc_present_values(

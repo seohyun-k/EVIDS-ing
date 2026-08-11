@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <everest/io/event/unique_fd.hpp>
+#include <everest/io/udp/endpoint.hpp>
 #include <everest/io/udp/udp_payload.hpp>
 #include <functional>
 #include <optional>
@@ -47,18 +48,20 @@ public:
      * @brief Open the socket as a server
      * @details Sets the socket non blocking
      * @param[in] port The port to listen to
+     * @param[in] device Optional interface name to bind to via SO_BINDTODEVICE. Empty = no binding.
      * @return True on success, false otherwise
      */
-    bool open_as_server(uint16_t port);
+    bool open_as_server(uint16_t port, std::string const& device = {});
 
     /**
      * @brief Open the socket as a server
      * @details Sets the socket non blocking
      * @param[in] remote The host to connect to
      * @param[in] port The port to listen to
+     * @param[in] device Optional interface name to bind to via SO_BINDTODEVICE. Empty = no binding.
      * @return True on success, false otherwise
      */
-    bool open_as_client(std::string const& remote, uint16_t port);
+    bool open_as_client(std::string const& remote, uint16_t port, std::string const& device = {});
 
     /**
      * @brief Check if the objects owns a socket
@@ -107,6 +110,18 @@ protected:
     bool tx_impl(void const* payload, size_t size, udp_info const& destination);
 
     /**
+     * @brief Send data to an explicit destination (IPv4 or IPv6).
+     * @details Family-agnostic variant of \ref tx_impl based on \ref endpoint.
+     * The operation will fail if the device is not open or if the data could
+     * not be sent for a different reason.
+     * @param[in] payload Payload
+     * @param[in] size Size of the payload.
+     * @param[in] destination The destination for the message
+     * @return True on success, false otherwise.
+     */
+    bool tx_impl(void const* payload, size_t size, endpoint const& destination);
+
+    /**
      * @brief Receive data from the socket
      * @details Can be used in server and client mode.
      * @param[inout] buffer Destination for the data
@@ -143,9 +158,10 @@ public:
      * Implementation for \p ClientPolicy
      * @param[in] remote The host to connect to
      * @param[in] port The port on host
+     * @param[in] device Optional interface name to bind to via SO_BINDTODEVICE. Empty = no binding.
      * @return True on success, false otherwise.
      */
-    bool open(std::string const& remote, uint16_t port);
+    bool open(std::string const& remote, uint16_t port, std::string const& device = {});
 
     /**
      * @brief Prepare the setup a UDP socket.
@@ -153,9 +169,10 @@ public:
      * @param[in] remote The host to connect to
      * @param[in] port The port on host
      * @param[in] timeout_ms Timeout for connecting to the remote
+     * @param[in] device Optional interface name to bind to via SO_BINDTODEVICE. Empty = no binding.
      * @return True on success, false otherwise.
      */
-    bool setup(std::string const& remote, uint16_t port, int timeout_ms);
+    bool setup(std::string const& remote, uint16_t port, int timeout_ms, std::string const& device = {});
 
     /**
      * @brief Long running part of the UDP connection process
@@ -183,6 +200,7 @@ private:
     std::string m_remote;
     uint16_t m_port{0};
     int m_timeout_ms{0};
+    std::string m_device;
 
     std::array<uint8_t, udp_payload::max_size> rx_buffer;
 };
@@ -213,9 +231,10 @@ public:
      * @details Sets the socket non blocking. <br>
      * Implementation for \p ClientPolicy
      * @param[in] port The port on host
+     * @param[in] device Optional interface name to bind to via SO_BINDTODEVICE. Empty = no binding.
      * @return True on success, false otherwise.
      */
-    bool open(uint16_t port);
+    bool open(uint16_t port, std::string const& device = {});
 
     /**
      * @brief Write a \ref udp_payload to the socket

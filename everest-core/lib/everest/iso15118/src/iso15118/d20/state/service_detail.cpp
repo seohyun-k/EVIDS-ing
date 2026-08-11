@@ -65,7 +65,7 @@ message_20::ServiceDetailResponse handle_request(const message_20::ServiceDetail
 
     message_20::ServiceDetailResponse res;
 
-    if (validate_and_setup_header(res.header, session, req.header.session_id) == false) {
+    if (not validate_and_setup_header(res.header, session, req.header.session_id)) {
         return response_with_code(res, dt::ResponseCode::FAILED_UnknownSession);
     }
 
@@ -121,6 +121,12 @@ message_20::ServiceDetailResponse handle_request(const message_20::ServiceDetail
             session.offered_services.ac_bpt_parameter_list[id] = parameter_set;
             res.service_parameter_list.push_back(dt::ParameterSet(id++, parameter_set));
         }
+    } else if (req.service == message_20::to_underlying_value(dt::ServiceCategory::AC_DER_IEC)) {
+        res.service = message_20::to_underlying_value(dt::ServiceCategory::AC_DER_IEC);
+        for (auto& parameter_set : config.ac_der_iec_parameter_list) {
+            session.offered_services.ac_der_iec_parameter_list[id] = parameter_set;
+            res.service_parameter_list.push_back(dt::ParameterSet(id++, parameter_set));
+        }
     } else if (req.service == message_20::to_underlying_value(dt::ServiceCategory::DC)) {
         res.service = message_20::to_underlying_value(dt::ServiceCategory::DC);
         for (auto& parameter_set : config.dc_parameter_list) {
@@ -173,13 +179,14 @@ message_20::ServiceDetailResponse handle_request(const message_20::ServiceDetail
         logf_warning("There is no parameters for this service %u available. Sending an \"empty\" response.",
                      req.service);
         res.service = req.service;
+        res.service_parameter_list = {dt::ParameterSet(0)};
     }
 
     return response_with_code(res, dt::ResponseCode::OK);
 }
 
 void ServiceDetail::enter() {
-    m_ctx.log.enter_state("ServiceDetail");
+    logf_debug("Enter state: ServiceDetail");
 }
 
 Result ServiceDetail::feed(Event ev) {
@@ -194,12 +201,16 @@ Result ServiceDetail::feed(Event ev) {
         logf_info("Requested info about ServiceID: %d", req->service);
 
         using Service = dt::ServiceCategory;
-        const std::vector<uint16_t> energy_services{
-            message_20::to_underlying_value(Service::AC),          message_20::to_underlying_value(Service::DC),
-            message_20::to_underlying_value(Service::WPT),         message_20::to_underlying_value(Service::DC_ACDP),
-            message_20::to_underlying_value(Service::AC_BPT),      message_20::to_underlying_value(Service::DC_BPT),
-            message_20::to_underlying_value(Service::DC_ACDP_BPT), message_20::to_underlying_value(Service::MCS),
-            message_20::to_underlying_value(Service::MCS_BPT)};
+        const std::vector<uint16_t> energy_services{message_20::to_underlying_value(Service::AC),
+                                                    message_20::to_underlying_value(Service::DC),
+                                                    message_20::to_underlying_value(Service::WPT),
+                                                    message_20::to_underlying_value(Service::DC_ACDP),
+                                                    message_20::to_underlying_value(Service::AC_BPT),
+                                                    message_20::to_underlying_value(Service::DC_BPT),
+                                                    message_20::to_underlying_value(Service::DC_ACDP_BPT),
+                                                    message_20::to_underlying_value(Service::MCS),
+                                                    message_20::to_underlying_value(Service::MCS_BPT),
+                                                    message_20::to_underlying_value(Service::AC_DER_IEC)};
 
         std::optional<dt::ServiceParameterList> custom_vas_parameters{std::nullopt};
 
@@ -242,7 +253,7 @@ Result ServiceDetail::feed(Event ev) {
 
         return {};
     } else {
-        m_ctx.log("expected ServiceDetailReq! But code type id: %d", variant->get_type());
+        logf_warning("Expected ServiceDetailReq! But code type id: %d", variant->get_type());
 
         // Sequence Error
         const message_20::Type req_type = variant->get_type();

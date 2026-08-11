@@ -44,7 +44,7 @@ ErrorManagerReq::Subscription::Subscription(const ErrorType& type_, const ErrorC
 void ErrorManagerReq::subscribe_error(const ErrorType& type, const ErrorCallback& callback,
                                       const ErrorCallback& clear_callback) {
     if (error_subscriptions.count(type) != 1) {
-        EVLOG_error << "Tpye " << type << " is not known, ignore subscription";
+        EVLOG_error << "Type " << type << " is not known, ignore subscription";
         return;
     }
     const Subscription sub(type, callback, clear_callback);
@@ -70,6 +70,18 @@ void ErrorManagerReq::on_error_raised(const Error& error) {
     if (!error_type_map->has(error.type)) {
         std::stringstream ss;
         ss << "Error type '" << error.type << "' is not defined, ignored.";
+        ss << std::endl << "Error object: " << nlohmann::json(error).dump(2);
+        EVLOG_error << ss.str();
+        return;
+    }
+    std::list<ErrorPtr> errors =
+        database->get_errors({ErrorFilter(TypeFilter(error.type)), ErrorFilter(SubTypeFilter(error.sub_type)),
+                              ErrorFilter(OriginFilter(error.origin))});
+    if (!errors.empty()) {
+        std::stringstream ss;
+        ss << "Error is already raised, type: " << error.type << ", sub_type: ";
+        ss << error.sub_type << ", origin: " << error.origin.module_id << "/";
+        ss << error.origin.implementation_id << ", ignored.";
         ss << std::endl << "Error object: " << nlohmann::json(error).dump(2);
         EVLOG_error << ss.str();
         return;

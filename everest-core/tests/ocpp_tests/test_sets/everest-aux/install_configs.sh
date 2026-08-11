@@ -1,7 +1,7 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 usage() {
-    echo "Usage: $0 <everest-core-installation-directory>"
+    echo "Usage: $0 <EVerest-installation-directory>"
     exit 1
 }
 
@@ -12,4 +12,5 @@ else
     mkdir -p "$EVEREST_OCPP_CONFIGS_PATH"
 
     cp config/libocpp-config-* "$EVEREST_OCPP_CONFIGS_PATH"
+    cp config/everest-config-* "$EVEREST_OCPP_CONFIGS_PATH"
 fi

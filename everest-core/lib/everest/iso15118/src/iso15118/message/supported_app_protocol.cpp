@@ -13,7 +13,7 @@ namespace iso15118::message_20 {
 
 template <> void convert(const struct appHand_supportedAppProtocolReq& in, SupportedAppProtocolRequest& out) {
     const auto& ap_in = in.AppProtocol;
-    out.app_protocol.reserve(ap_in.arrayLen);
+    out.app_protocol.clear();
 
     for (size_t i = 0; i < ap_in.arrayLen; ++i) {
         const auto& item_in = ap_in.array[i];
@@ -57,8 +57,20 @@ template <> void convert(const SupportedAppProtocolResponse& in, struct appHand_
     }
 }
 
+template <> void convert(const struct appHand_supportedAppProtocolRes& in, SupportedAppProtocolResponse& out) {
+    cb_convert_enum(in.ResponseCode, out.response_code);
+
+    if (in.SchemaID_isUsed) {
+        out.schema_id.emplace(in.SchemaID);
+    }
+}
+
 template <> void insert_type(VariantAccess& va, const struct appHand_supportedAppProtocolReq& in) {
     va.insert_type<SupportedAppProtocolRequest>(in);
+};
+
+template <> void insert_type(VariantAccess& va, const struct appHand_supportedAppProtocolRes& in) {
+    va.insert_type<SupportedAppProtocolResponse>(in);
 };
 
 template <> int serialize_to_exi(const SupportedAppProtocolResponse& in, exi_bitstream_t& out) {

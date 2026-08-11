@@ -3,11 +3,12 @@
 #pragma once
 
 #include <array>
+#include <bitset>
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <variant>
-#include <vector>
+
+#include <everest/util/vector/fixed_vector.hpp>
 
 namespace iso15118::message_20 {
 
@@ -28,14 +29,15 @@ using Description = std::string; // MaxLength: 160
 static constexpr auto SESSION_ID_LENGTH = 8;
 using SessionId = std::array<uint8_t, SESSION_ID_LENGTH>;
 
-using MeterId = std::string;        // MaxLength: 32
-using MeterSignature = std::string; // Base64 encoded, MaxLength: 64
+using MeterId = std::string; // MaxLength: 32
+static constexpr auto METER_SIGNATURE_LENGTH = 64;
+using MeterSignature = std::array<uint8_t, METER_SIGNATURE_LENGTH>; // Base64 encoded, MaxLength: 64
 
 static constexpr auto GEN_CHALLENGE_LENGTH = 16;
 using GenChallenge = std::array<uint8_t, GEN_CHALLENGE_LENGTH>; // Base64 encoded, MaxLength: 16
 
-using Certificate = std::string;                 // Base64 encoded, MaxLength: 1600
-using SubCertificate = std::vector<Certificate>; // Max: 3
+using Certificate = std::string;                                         // Base64 encoded, MaxLength: 1600
+using SubCertificate = everest::lib::util::fixed_vector<Certificate, 3>; // Max: 3
 
 enum class ResponseCode {
     OK = 0,
@@ -101,7 +103,8 @@ enum class ServiceCategory : uint16_t {
     DC_ACDP_BPT = 7,
     MCS = 8,
     MCS_BPT = 9,
-    AC_DER = 10,
+    AC_DER_IEC = 10,
+    AC_DER_SAE = 11,
     Internet = 65,
     ParkingStatus = 66,
 };
@@ -219,6 +222,10 @@ struct AcBptParameterList : AcParameterList {
     GridCodeIslandingDetectionMethod grid_code_detection_method;
 };
 
+struct AcDerParameterList : AcParameterList {
+    std::bitset<12> der_control_functions;
+};
+
 struct DcParameterList {
     DcConnector connector;
     ControlMode control_mode;
@@ -322,7 +329,7 @@ struct Receipt {
     std::optional<DetailedCost> occupancy_costs;
     std::optional<DetailedCost> additional_service_costs;
     std::optional<DetailedCost> overstay_costs;
-    std::vector<DetailedTax> tax_costs; // 0 to 10 elements! // FIXME(sl): optional?
+    everest::lib::util::fixed_vector<DetailedTax, 10> tax_costs; // 0 to 10 elements! // FIXME(sl): optional?
 };
 
 struct X509IssuerSerial {
@@ -331,7 +338,7 @@ struct X509IssuerSerial {
 };
 
 struct ListOfRootCertificateIDs {
-    std::vector<X509IssuerSerial> root_certificate_id;
+    everest::lib::util::fixed_vector<X509IssuerSerial, 20> root_certificate_id;
 };
 
 // TODO(sl): Adding content to following structs

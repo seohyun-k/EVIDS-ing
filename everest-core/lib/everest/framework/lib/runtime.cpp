@@ -3,6 +3,7 @@
 
 #include <framework/runtime.hpp>
 #include <utils/config/storage_sqlite.hpp>
+#include <utils/date.hpp>
 #include <utils/error.hpp>
 #include <utils/error/error_factory.hpp>
 #include <utils/error/error_json.hpp>
@@ -215,7 +216,7 @@ void ManagerSettings::init_settings(const everest::config::Settings& settings) {
 
     std::string mqtt_broker_socket_path;
     std::string mqtt_broker_host;
-    int mqtt_broker_port = 0;
+    std::uint16_t mqtt_broker_port = 0;
     std::string mqtt_everest_prefix;
     std::string mqtt_external_prefix;
 
@@ -265,7 +266,7 @@ void ManagerSettings::init_settings(const everest::config::Settings& settings) {
 
     if (mqtt_server_port != nullptr) {
         try {
-            mqtt_broker_port = std::stoi(mqtt_server_port);
+            mqtt_broker_port = std::stoul(mqtt_server_port);
         } catch (...) {
             EVLOG_warning << "Environment variable MQTT_SERVER_PORT set, but not set to an integer. Ignoring.";
         }
@@ -425,8 +426,12 @@ ModuleCallbacks::ModuleCallbacks(
     const std::function<void(ModuleAdapter module_adapter)>& register_module_adapter,
     const std::function<std::vector<cmd>(const RequirementInitialization& requirement_init)>& everest_register,
     const std::function<void(ModuleConfigs module_configs, const ModuleInfo& info)>& init,
-    const std::function<void()>& ready) :
-    register_module_adapter(register_module_adapter), everest_register(everest_register), init(init), ready(ready) {
+    const std::function<void()>& ready, const std::function<void()>& shutdown) :
+    register_module_adapter(register_module_adapter),
+    everest_register(everest_register),
+    init(init),
+    ready(ready),
+    shutdown(shutdown) {
 }
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays): pass-through of argc and argv from main()
@@ -448,14 +453,16 @@ int ModuleLoader::initialize() {
     }
     Logging::init(this->logging_config_file.string(), this->module_id);
 
-    const auto start_time = std::chrono::system_clock::now();
+    Date::preload_tzdb();
 
-    this->mqtt = std::make_shared<MQTTAbstraction>(this->mqtt_settings);
+    const auto start_time = std::chrono::steady_clock::now();
+
+    this->mqtt = std::shared_ptr<MQTTAbstraction>(make_mqtt_abstraction(this->mqtt_settings));
     this->mqtt->connect();
     this->mqtt->spawn_main_loop_thread();
 
     const auto result = get_module_config(this->mqtt, this->module_id);
-    const auto get_config_time = std::chrono::system_clock::now();
+    const auto get_config_time = std::chrono::steady_clock::now();
     EVLOG_debug << "Module " << fmt::format(TERMINAL_STYLE_OK, "{}", module_id) << " get_config() ["
                 << std::chrono::duration_cast<std::chrono::milliseconds>(get_config_time - start_time).count() << "ms]";
 
@@ -467,9 +474,19 @@ int ModuleLoader::initialize() {
     }
 
     const auto& rs = this->runtime_settings;
+    const auto shutdown_mqtt = [this]() {
+        if (this->mqtt) {
+            try {
+                this->mqtt->disconnect();
+            } catch (const std::exception& e) {
+                EVLOG_critical << fmt::format("MQTT disconnect in exception path failed: {}", e.what());
+            }
+        }
+    };
+
     try {
         const auto config = Config(this->mqtt_settings, result);
-        const auto config_instantiation_time = std::chrono::system_clock::now();
+        const auto config_instantiation_time = std::chrono::steady_clock::now();
         EVLOG_debug
             << "Module " << fmt::format(TERMINAL_STYLE_OK, "{}", module_id) << " after Config() instantiation ["
             << std::chrono::duration_cast<std::chrono::milliseconds>(config_instantiation_time - start_time).count()
@@ -515,12 +532,12 @@ int ModuleLoader::initialize() {
 
         ModuleAdapter module_adapter;
 
-        module_adapter.call = [&everest](const Requirement& req, const std::string& cmd_name, Parameters args) {
-            return everest.call_cmd(req, cmd_name, std::move(args));
+        module_adapter.call = [&everest](const Requirement& req, const std::string& cmd_name, const Parameters& args) {
+            return everest.call_cmd(req, cmd_name, args);
         };
 
-        module_adapter.publish = [&everest](const std::string& param1, const std::string& param2, Value param3) {
-            return everest.publish_var(param1, param2, std::move(param3));
+        module_adapter.publish = [&everest](const std::string& req, const std::string& var_name, const Value& value) {
+            return everest.publish_var(req, var_name, value);
         };
 
         module_adapter.subscribe = [&everest](const Requirement& req, const std::string& var_name,
@@ -558,7 +575,8 @@ int ModuleLoader::initialize() {
 
         // NOLINTNEXTLINE(modernize-avoid-bind): prefer bind here for readability
         module_adapter.ext_mqtt_publish =
-            std::bind(&Everest::Everest::external_mqtt_publish, &everest, std::placeholders::_1, std::placeholders::_2);
+            std::bind(&Everest::Everest::external_mqtt_publish, &everest, std::placeholders::_1, std::placeholders::_2,
+                      std::placeholders::_3);
 
         module_adapter.ext_mqtt_subscribe = [&everest](const std::string& topic, const StringHandler& handler) {
             return everest.provide_external_mqtt_handler(topic, handler);
@@ -599,27 +617,33 @@ int ModuleLoader::initialize() {
 
         everest.spawn_main_loop_thread();
 
-        // register the modules ready handler with the framework
-        // this handler gets called when the global ready signal is received
+        // register the modules ready handler with the framework.
+        // this handler gets called when the global ready signal is received.
         everest.register_on_ready_handler(this->callbacks.ready);
+
+        // Register the module shutdown handler with the framework.
+        // This handler is called when the global shutdown signal is received.
+        everest.register_on_shutdown_handler(this->callbacks.shutdown);
 
         // the module should now be ready
         everest.signal_ready();
 
-        const auto end_time = std::chrono::system_clock::now();
+        const auto end_time = std::chrono::steady_clock::now();
         EVLOG_info << "Module " << fmt::format(TERMINAL_STYLE_BLUE, "{}", module_id) << " initialized ["
                    << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() << "ms]";
 
         everest.wait_for_main_loop_end();
-
-        EVLOG_info << "Exiting...";
     } catch (boost::exception& e) {
         EVLOG_critical << fmt::format("Caught top level boost::exception:\n{}", boost::diagnostic_information(e, true));
+        shutdown_mqtt();
+        return EXIT_FAILURE;
     } catch (std::exception& e) {
         EVLOG_critical << fmt::format("Caught top level std::exception:\n{}", boost::diagnostic_information(e, true));
+        shutdown_mqtt();
+        return EXIT_FAILURE;
     }
 
-    return 0;
+    return EXIT_SUCCESS;
 }
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays): pass-through of argc and argv from main()
@@ -703,9 +727,13 @@ bool ModuleLoader::parse_command_line(int argc, char* argv[]) {
         }
     }
 
-    int mqtt_broker_port = defaults::MQTT_BROKER_PORT;
+    std::uint16_t mqtt_broker_port = defaults::MQTT_BROKER_PORT;
     if (vm.count("mqtt_broker_port") != 0) {
-        mqtt_broker_port = vm["mqtt_broker_port"].as<int>();
+        const auto mqtt_broker_port_int = vm["mqtt_broker_port"].as<int>();
+        if (mqtt_broker_port_int > std::numeric_limits<std::uint16_t>::max()) {
+            throw BootException(fmt::format("MQTT broker port {} is out of range.", mqtt_broker_port_int));
+        }
+        mqtt_broker_port = static_cast<std::uint16_t>(mqtt_broker_port_int);
     }
 
     // overwrite mqtt broker port with environment variable
@@ -714,7 +742,7 @@ bool ModuleLoader::parse_command_line(int argc, char* argv[]) {
 
     if (mqtt_server_port != nullptr) {
         try {
-            mqtt_broker_port = std::stoi(mqtt_server_port);
+            mqtt_broker_port = std::stoul(mqtt_server_port);
         } catch (...) {
             EVLOG_warning << "Environment variable MQTT_SERVER_PORT set, but not set to an integer. Ignoring.";
         }

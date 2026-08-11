@@ -16,6 +16,8 @@
 #include <bitset>
 #include <mutex>
 
+#include "der_relay.hpp"
+#include "grid_event.hpp"
 #include "utils.hpp"
 
 #include <iso15118/d20/config.hpp>
@@ -57,6 +59,8 @@ protected:
     virtual void handle_stop_charging(bool& stop) override;
     virtual void handle_pause_charging(bool& pause) override;
     virtual void handle_no_energy_pause_charging(types::iso15118::NoEnergyPauseMode& mode) override;
+    virtual bool
+    handle_update_supported_app_protocols(types::iso15118::SupportedAppProtocols& supported_app_protocols) override;
     virtual void handle_update_energy_transfer_modes(
         std::vector<types::iso15118::EnergyTransferMode>& supported_energy_transfer_modes) override;
     virtual void handle_update_ac_max_current(double& max_current) override;
@@ -93,11 +97,26 @@ private:
     iso15118::d20::EvseSetupConfig setup_config;
     std::bitset<NUMBER_OF_SETUP_STEPS> setup_steps_done{0};
 
+    std::optional<float> evse_max_reactive_power;
+
     std::vector<iso15118::d20::SupportedVASs> supported_vas_services_per_provider;
     std::mutex vas_mutex;
 
     void update_supported_vas_services();
     std::optional<size_t> get_vas_provider_index(uint16_t service_id);
+
+    // EV grid-event fault detector; outlives sessions (reset at SETUP_FINISHED), touched only by the charger thread.
+    GridEventEdgeDetector grid_event_detector;
+    void publish_grid_event(uint8_t condition);
+
+    // EV-negotiated DER control functions from ServiceSelection; read at ChargeParameterDiscovery to
+    // surface ev_supported_dercontrol. Reset at SETUP_FINISHED; touched only by the charger thread.
+    std::bitset<12> ev_selected_der_control_functions;
+
+    // Serializes apply_active_der_directives so the per-name update loop cannot interleave between two
+    // concurrent applies and leave a mixed DER-function map. Outermost lock; acquired before GEL.
+    std::mutex der_apply_mutex;
+    void apply_active_der_directives();
     // ev@3370e4dd-95f4-47a9-aaec-ea76f34a66c9:v1
 };
 

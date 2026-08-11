@@ -1,54 +1,48 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2020 - 2025 Pionix GmbH and Contributors to EVerest
+// Copyright 2020 - 2026 Pionix GmbH and Contributors to EVerest
 
 #include "error_history/codec.hpp"
 #include "error_history/API.hpp"
 #include "error_history/json_codec.hpp"
 #include "nlohmann/json.hpp"
 #include "utilities/constants.hpp"
+#include "utilities/json_codec_helpers.hpp"
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace everest::lib::API::V1_0::types::error_history {
 
 std::string serialize(State val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(SeverityFilter val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(Severity val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(ImplementationIdentifier const& val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(TimeperiodFilter const& val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(FilterArguments const& val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(ErrorObject const& val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(ErrorList const& val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::ostream& operator<<(std::ostream& os, State const& val) {
@@ -91,52 +85,36 @@ std::ostream& operator<<(std::ostream& os, ErrorList const& val) {
     return os;
 }
 
-template <> State deserialize(std::string const& val) {
-    auto data = json::parse(val);
-    State obj = data;
-    return obj;
+template <> State deserialize(std::string_view val) {
+    return utilities::parse_json<State>(val);
 }
 
-template <> SeverityFilter deserialize<>(std::string const& val) {
-    auto data = json::parse(val);
-    SeverityFilter obj = data;
-    return obj;
+template <> SeverityFilter deserialize(std::string_view val) {
+    return utilities::parse_json<SeverityFilter>(val);
 }
 
-template <> Severity deserialize<>(std::string const& val) {
-    auto data = json::parse(val);
-    Severity obj = data;
-    return obj;
+template <> Severity deserialize(std::string_view val) {
+    return utilities::parse_json<Severity>(val);
 }
 
-template <> ImplementationIdentifier deserialize<>(std::string const& val) {
-    auto data = json::parse(val);
-    ImplementationIdentifier obj = data;
-    return obj;
+template <> ImplementationIdentifier deserialize(std::string_view val) {
+    return utilities::parse_json<ImplementationIdentifier>(val);
 }
 
-template <> TimeperiodFilter deserialize<>(std::string const& val) {
-    auto data = json::parse(val);
-    TimeperiodFilter obj = data;
-    return obj;
+template <> TimeperiodFilter deserialize(std::string_view val) {
+    return utilities::parse_json<TimeperiodFilter>(val);
 }
 
-template <> FilterArguments deserialize<>(std::string const& val) {
-    auto data = json::parse(val);
-    FilterArguments obj = data;
-    return obj;
+template <> FilterArguments deserialize(std::string_view val) {
+    return utilities::parse_json<FilterArguments>(val);
 }
 
-template <> ErrorObject deserialize<>(const std::string& val) {
-    auto data = json::parse(val);
-    ErrorObject obj = data;
-    return obj;
+template <> ErrorObject deserialize(std::string_view val) {
+    return utilities::parse_json<ErrorObject>(val);
 }
 
-template <> ErrorList deserialize<>(const std::string& val) {
-    auto data = json::parse(val);
-    ErrorList obj = data;
-    return obj;
+template <> ErrorList deserialize(std::string_view val) {
+    return utilities::parse_json<ErrorList>(val);
 }
 
 } // namespace everest::lib::API::V1_0::types::error_history

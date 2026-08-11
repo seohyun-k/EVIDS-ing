@@ -4,6 +4,14 @@
 .. OCPP 2.1 and 2.0.1 Module
 .. *************************
 
+.. warning::
+
+   **Deprecated:** This module is deprecated in favor of the combined OCPP module
+   :ref:`OCPPmulti <everest_modules_OCPPmulti>`, which supports OCPP 1.6, 2.0.1 and 2.1
+   in one module. New integrations should use it — see the
+   :ref:`combined module tutorial <tutorial-ocpp-combined>` and the
+   :ref:`migration guide <howto-ocpp-storage-migration>`.
+
 This module implements and integrates OCPP 2.0.1 and OCPP 2.1 within EVerest. A connection to a Charging Station Management System (CSMS) can be
 established by loading this module as part of the EVerest configuration. This module leverages `libocpp <https://github.com/EVerest/libocpp>`_,
 EVerest's OCPP library.
@@ -448,11 +456,11 @@ Clarification of the device model classes of this diagram:
 
 * EverestDeviceModelStorage
 
-  * Implements DeviceModelStorageInterface as part of everest-core (OCPP201 module)
+  * Implements DeviceModelStorageInterface as part of EVerest (OCPP201 module)
   * Uses EVerest config service to retrieve configuration variables of EVerest modules
 
 * ComposedDeviceModelStorage
 
-  * (Final) implementation of DeviceModelStorageInterface as part of everest-core (OCPP201 module)
+  * (Final) implementation of DeviceModelStorageInterface as part of EVerest (OCPP201 module)
   * A reference of this class will be passed to libocpp's ChargePoint constructor
   * Differentiates between externally and internally managed variables

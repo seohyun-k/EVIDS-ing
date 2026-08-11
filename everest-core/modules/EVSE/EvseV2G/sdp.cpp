@@ -3,6 +3,8 @@
 // Copyright (C) 2022-2023 Contributors to EVerest
 #include "sdp.hpp"
 #include "log.hpp"
+#include "telemetry_publisher.hpp"
+#include "tools.hpp"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -15,9 +17,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#include <everest/util/misc/change_tracker.hpp>
 
 #define DEBUG 1
 
@@ -40,6 +45,12 @@
 #define IN6ADDR_ALLNODES                                                                                               \
     { 0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01 }
 
+namespace telemetry_types = everest::lib::API::V1_0::types::telemetry;
+using V2gTransportTracker = everest::lib::util::change_tracker<telemetry_types::V2gTransport>;
+using V2gEvElectricalTracker = everest::lib::util::change_tracker<telemetry_types::V2gEvElectrical>;
+using V2gPaymentServiceTracker = everest::lib::util::change_tracker<telemetry_types::V2gPaymentService>;
+using V2gChargerStatusTracker = everest::lib::util::change_tracker<telemetry_types::V2gChargerStatus>;
+
 /* bundles various aspects of a SDP query */
 struct sdp_query {
     struct v2g_context* v2g_ctx;
@@ -49,6 +60,16 @@ struct sdp_query {
     enum sdp_security security_requested;
     enum sdp_transport_protocol proto_requested;
 };
+
+static void set_sdp_failure_detail(std::string* failure_detail, const std::string& detail) {
+    if (failure_detail != nullptr) {
+        *failure_detail = detail;
+    }
+}
+
+static bool should_log_sdp_init_failure(const std::string* failure_detail) {
+    return failure_detail == nullptr;
+}
 
 /*
  * Fills the SDP header into a given buffer
@@ -205,44 +226,72 @@ int sdp_send_response(int sdp_socket, struct sdp_query* sdp_query) {
 }
 
 int sdp_init(struct v2g_context* v2g_ctx) {
+    return sdp_init(v2g_ctx, nullptr);
+}
+
+int sdp_init(struct v2g_context* v2g_ctx, std::string* failure_detail) {
     struct sockaddr_in6 sdp_addr = {AF_INET6, htons(SDP_SRV_PORT)};
     struct ipv6_mreq mreq = {{IN6ADDR_ALLNODES}, 0};
     int enable = 1;
+    const auto log_setup_failures = should_log_sdp_init_failure(failure_detail);
+
+    set_sdp_failure_detail(failure_detail, "Failed to initialize SDP socket");
 
     mreq.ipv6mr_interface = if_nametoindex(v2g_ctx->if_name);
     if (!mreq.ipv6mr_interface) {
-        dlog(DLOG_LEVEL_ERROR, "No such interface: %s", v2g_ctx->if_name);
+        set_sdp_failure_detail(failure_detail, std::string("No such interface: ") + v2g_ctx->if_name);
+        if (log_setup_failures) {
+            dlog(DLOG_LEVEL_ERROR, "No such interface: %s", v2g_ctx->if_name);
+        }
+        v2g_ctx->sdp_socket = -1;
         return -1;
     }
 
     /* create receiving socket */
     v2g_ctx->sdp_socket = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
     if (v2g_ctx->sdp_socket == -1) {
-        dlog(DLOG_LEVEL_ERROR, "socket() failed: %s", strerror(errno));
+        const auto error = std::string(strerror(errno));
+        set_sdp_failure_detail(failure_detail, "socket() failed: " + error);
+        if (log_setup_failures) {
+            dlog(DLOG_LEVEL_ERROR, "socket() failed: %s", error.c_str());
+        }
         return -1;
     }
 
     if (setsockopt(v2g_ctx->sdp_socket, SOL_SOCKET, SO_REUSEPORT, &enable, sizeof(enable)) == -1) {
-        dlog(DLOG_LEVEL_ERROR, "setsockopt(SO_REUSEPORT) failed: %s", strerror(errno));
+        const auto error = std::string(strerror(errno));
+        set_sdp_failure_detail(failure_detail, "setsockopt(SO_REUSEPORT) failed: " + error);
+        if (log_setup_failures) {
+            dlog(DLOG_LEVEL_ERROR, "setsockopt(SO_REUSEPORT) failed: %s", error.c_str());
+        }
         close(v2g_ctx->sdp_socket);
+        v2g_ctx->sdp_socket = -1;
         return -1;
     }
 
     sdp_addr.sin6_addr = in6addr_any;
 
     if (bind(v2g_ctx->sdp_socket, (struct sockaddr*)&sdp_addr, sizeof(sdp_addr)) == -1) {
-        dlog(DLOG_LEVEL_ERROR, "bind() failed: %s", strerror(errno));
+        const auto error = std::string(strerror(errno));
+        set_sdp_failure_detail(failure_detail, "bind() failed: " + error);
+        if (log_setup_failures) {
+            dlog(DLOG_LEVEL_ERROR, "bind() failed: %s", error.c_str());
+        }
         close(v2g_ctx->sdp_socket);
+        v2g_ctx->sdp_socket = -1;
         return -1;
     }
-
-    dlog(DLOG_LEVEL_INFO, "SDP socket setup succeeded");
 
     /* bind only to specified device */
     if (setsockopt(v2g_ctx->sdp_socket, SOL_SOCKET, SO_BINDTODEVICE, v2g_ctx->if_name, strlen(v2g_ctx->if_name)) ==
         -1) {
-        dlog(DLOG_LEVEL_ERROR, "setsockopt(SO_BINDTODEVICE) failed: %s", strerror(errno));
+        const auto error = std::string(strerror(errno));
+        set_sdp_failure_detail(failure_detail, "setsockopt(SO_BINDTODEVICE) failed: " + error);
+        if (log_setup_failures) {
+            dlog(DLOG_LEVEL_ERROR, "setsockopt(SO_BINDTODEVICE) failed: %s", error.c_str());
+        }
         close(v2g_ctx->sdp_socket);
+        v2g_ctx->sdp_socket = -1;
         return -1;
     }
 
@@ -250,12 +299,24 @@ int sdp_init(struct v2g_context* v2g_ctx) {
 
     /* join multicast group */
     if (setsockopt(v2g_ctx->sdp_socket, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq, sizeof(mreq)) == -1) {
-        dlog(DLOG_LEVEL_ERROR, "setsockopt(IPV6_JOIN_GROUP) failed: %s", strerror(errno));
+        const auto error = std::string(strerror(errno));
+        set_sdp_failure_detail(failure_detail, "setsockopt(IPV6_JOIN_GROUP) failed: " + error);
+        if (log_setup_failures) {
+            dlog(DLOG_LEVEL_ERROR, "setsockopt(IPV6_JOIN_GROUP) failed: %s", error.c_str());
+        }
         close(v2g_ctx->sdp_socket);
+        v2g_ctx->sdp_socket = -1;
         return -1;
     }
 
     dlog(DLOG_LEVEL_TRACE, "joined multicast group");
+    dlog(DLOG_LEVEL_INFO, "SDP socket setup succeeded");
+
+    if (v2g_ctx->telemetry_publisher) {
+        v2g_ctx->telemetry_publisher->update_transport([&](V2gTransportTracker& transport) {
+            transport.set(&telemetry_types::V2gTransport::udp_server_status, telemetry_types::V2gServerStatus::Active);
+        });
+    }
 
     return 0;
 }
@@ -272,6 +333,29 @@ int sdp_listen(struct v2g_context* v2g_ctx) {
             .v2g_ctx = v2g_ctx,
         };
         socklen_t addrlen = sizeof(sdp_query.remote_addr);
+
+        /* Track V2G communication setup timeout [V2G2-723] */
+        long long int dlink_ready_time = v2g_ctx->sdp_dlink_ready_time.load();
+
+        /* Cancel timeout if a V2G TCP/TLS connection was established */
+        if (v2g_ctx->connection_initiated && dlink_ready_time != 0) {
+            dlog(DLOG_LEVEL_INFO, "V2G TCP/TLS connection established, SDP communication setup timeout cancelled");
+            v2g_ctx->sdp_dlink_ready_time = 0;
+        }
+
+        /* Check if V2G communication setup timeout has expired */
+        if (dlink_ready_time != 0 && !v2g_ctx->connection_initiated) {
+            long long int elapsed = getmonotonictime() - dlink_ready_time;
+            if (elapsed >= V2G_COMMUNICATION_SETUP_TIMEOUT) {
+                dlog(DLOG_LEVEL_WARNING,
+                     "V2G communication setup timeout (%dms) expired - signaling dlink_error to EvseManager [V2G2-723]",
+                     V2G_COMMUNICATION_SETUP_TIMEOUT);
+                v2g_ctx->p_charger->publish_dlink_error(nullptr);
+                v2g_ctx->sdp_dlink_ready = false;
+                v2g_ctx->sdp_dlink_ready_time = 0;
+                continue;
+            }
+        }
 
         /* Check if data was received on socket */
         signed status = poll(&pollfd, 1, POLL_TIMEOUT);
@@ -311,8 +395,22 @@ int sdp_listen(struct v2g_context* v2g_ctx) {
             sdp_query.security_requested = (sdp_security)buffer[SDP_HEADER_LEN + 0];
             sdp_query.proto_requested = (sdp_transport_protocol)buffer[SDP_HEADER_LEN + 1];
 
+            if (v2g_ctx->telemetry_publisher) {
+                v2g_ctx->telemetry_publisher->update_transport([&](V2gTransportTracker& transport) {
+                    transport.set(&telemetry_types::V2gTransport::tcp_discovery_enable,
+                                  sdp_query.proto_requested == SDP_TRANSPORT_PROTOCOL_TCP);
+                    transport.set(&telemetry_types::V2gTransport::tcp_security_enable,
+                                  sdp_query.security_requested == SDP_SECURITY_TLS);
+                });
+            }
+
             dlog(DLOG_LEVEL_INFO, "Received packet from [%s]:%" PRIu16 " with security 0x%02x and protocol 0x%02x",
                  addr, ntohs(sdp_query.remote_addr.sin6_port), sdp_query.security_requested, sdp_query.proto_requested);
+
+            if (!v2g_ctx->sdp_dlink_ready) {
+                dlog(DLOG_LEVEL_INFO, "SDP request discarded: dlink not ready");
+                continue;
+            }
 
             sdp_send_response(v2g_ctx->sdp_socket, &sdp_query);
         }
@@ -321,6 +419,20 @@ int sdp_listen(struct v2g_context* v2g_ctx) {
     if (close(v2g_ctx->sdp_socket) == -1) {
         dlog(DLOG_LEVEL_ERROR, "close() failed: %s", strerror(errno));
     }
+    v2g_ctx->sdp_socket = -1;
+
+    if (v2g_ctx->telemetry_publisher) {
+        v2g_ctx->telemetry_publisher->update_transport([&](V2gTransportTracker& transport) {
+            transport.set(&telemetry_types::V2gTransport::udp_server_status,
+                          telemetry_types::V2gServerStatus::Inactive);
+        });
+    }
 
     return 0;
+}
+
+void sdp_set_dlink_ready(struct v2g_context* v2g_ctx, bool ready) {
+    v2g_ctx->sdp_dlink_ready = ready;
+    v2g_ctx->sdp_dlink_ready_time = ready ? getmonotonictime() : 0;
+    dlog(DLOG_LEVEL_INFO, "SDP dlink_ready set to %s", ready ? "true" : "false");
 }

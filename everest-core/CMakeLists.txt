@@ -1,17 +1,17 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(everest-core
-    VERSION 2026.02.0
+    VERSION 2026.10.0
     DESCRIPTION "The open operating system for e-mobility charging stations"
 	LANGUAGES CXX C
 )
 
-find_package(everest-cmake 0.5
+find_package(everest-cmake 0.7
     COMPONENTS bundling
     PATHS ../everest-cmake
     NO_DEFAULT_PATH
 )
-find_package(everest-cmake 0.5
+find_package(everest-cmake 0.7
     COMPONENTS bundling
 )
 
@@ -21,7 +21,7 @@ if (NOT everest-cmake_FOUND)
     FetchContent_Declare(
         everest-cmake
         GIT_REPOSITORY https://github.com/EVerest/everest-cmake.git
-        GIT_TAG        main
+        GIT_TAG        29fdd49cb9db7c4867f8e6aac6d810e79ad5b2a6 # v0.7.0
     )
     FetchContent_MakeAvailable(everest-cmake)
     set(everest-cmake_DIR "${everest-cmake_SOURCE_DIR}")
@@ -66,6 +66,7 @@ endif()
 option(CREATE_SYMLINKS "Create symlinks to javascript modules and auxillary files - for development purposes" OFF)
 option(CMAKE_RUN_CLANG_TIDY "Run clang-tidy" OFF)
 option(ISO15118_2_GENERATE_AND_INSTALL_CERTIFICATES "Automatically generate and install certificates for development purposes" ON)
+option(EEBUS_GENERATE_AND_INSTALL_CERTIFICATES "Automatically generate and install certificates for development purposes" OFF)
 option(EVEREST_ENABLE_RUN_SCRIPT_GENERATION "Enables the generation of run scripts (convenience scripts for starting available configurations)" ON)
 option(EVEREST_BUILD_DOCS "Build EVerest documentation" OFF)
 option(EVEREST_SKIP_BUILD_API_DOC "Skip building the async API html doc for the EVerest API" OFF)
@@ -74,7 +75,18 @@ option(BUILD_TESTING "Build unit tests, used if standalone project" OFF)
 option(EVEREST_ENABLE_COMPILE_WARNINGS "Enable compile warnings set in the EVEREST_COMPILE_OPTIONS flag" OFF)
 option(EVEREST_ENABLE_GLOBAL_COMPILE_WARNINGS "Enable compile warnings set in the EVEREST_COMPILE_OPTIONS flag globally" OFF)
 option(EVEREST_ENABLE_DEBUG_BUILD "Enable debug build" OFF)
+# When ON: enables compiler coverage flags where supported, defines EVEREST_COVERAGE_ENABLED for
+# code that must only run under instrumentation (see helpers coverage helpers), and wires CTest
+# coverage targets in test CMake files. Does not control whether library unit tests are built;
+# that remains BUILD_TESTING / per-project *_BUILD_TESTING. Python integration tests that spawn
+# the manager should use EverestCore so each run sets GCOV_PREFIX under a private workspace—parallel
+# pytest workers would otherwise clobber shared .gcda files in the build tree.
+option(EVEREST_ENABLE_COVERAGE "Enable code coverage instrumentation and coverage targets" OFF)
 option(EVEREST_BUILD_APPLICATIONS "Build applications like drivers for the EVerest stable API" ON)
+option(EVEREST_LIBS_ONLY "Only build libraries, skip modules/applications/config" OFF)
+option(EVEREST_IO_WITH_MQTT "Build MQTT (mosquitto) support in everest::io" ON)
+set(EVEREST_INCLUDE_LIBS "" CACHE STRING "Semicolon-separated allowlist of libraries to build (empty = all)")
+set(EVEREST_EXCLUDE_LIBS "" CACHE STRING "Semicolon-separated blocklist of libraries to skip")
 # list of compile options that are passed to modules if EVEREST_ENABLE_COMPILE_WARNINGS=ON
 # generated code has functions often not used
 set(EVEREST_COMPILE_OPTIONS "-Wall;-Wno-unused-function" CACHE STRING "A list of compile options used for building modules")
@@ -96,14 +108,19 @@ endif()
 # This is a flag for building development tests, but not necessarily to run them, for expample in case
 # tests requires hardware.
 option(BUILD_DEV_TESTS "Build dev tests" OFF)
-ev_setup_cmake_variables_python_wheel()
-option(${PROJECT_NAME}_INSTALL_EV_CLI_IN_PYTHON_VENV "Install ev-cli in python venv instead of using system" ON)
-set(${PROJECT_NAME}_PYTHON_VENV_PATH "${CMAKE_BINARY_DIR}/venv" CACHE PATH "Path to python venv")
 
-ev_setup_python_executable(
-    USE_PYTHON_VENV ${${PROJECT_NAME}_USE_PYTHON_VENV}
-    PYTHON_VENV_PATH ${${PROJECT_NAME}_PYTHON_VENV_PATH}
-)
+if(NOT EVEREST_LIBS_ONLY)
+    ev_setup_cmake_variables_python_wheel()
+    option(${PROJECT_NAME}_INSTALL_EV_CLI_IN_PYTHON_VENV "Install ev-cli in python venv instead of using system" ON)
+endif()
+
+if(NOT EVEREST_LIBS_ONLY OR NOT DISABLE_EDM)
+    set(${PROJECT_NAME}_PYTHON_VENV_PATH "${CMAKE_BINARY_DIR}/venv" CACHE PATH "Path to python venv")
+    ev_setup_python_executable(
+        USE_PYTHON_VENV ${${PROJECT_NAME}_USE_PYTHON_VENV}
+        PYTHON_VENV_PATH ${${PROJECT_NAME}_PYTHON_VENV_PATH}
+    )
+endif()
 
 # Already include CTest here to allow it to find tests defined in subdirectories like lib and modules
 if(EVEREST_CORE_BUILD_TESTING)
@@ -119,23 +136,29 @@ if(EVEREST_CORE_BUILD_TESTING)
 endif()
 
 include(ev-define-dependency)
+include(ev-lib-dependencies)
+include(ev-packaging)
 
-include("module-dependencies.cmake")
+if(NOT EVEREST_LIBS_ONLY)
+    include("module-dependencies.cmake")
+endif()
 
 # this policy allows us to continue using the removed FindBoost module for now
 if(POLICY CMP0167)
     cmake_policy(SET CMP0167 OLD)
 endif()
 
-find_package(Boost
-    COMPONENTS
-        filesystem
-        program_options
-        thread
-    REQUIRED
-)
+if(NOT EVEREST_LIBS_ONLY)
+  find_package(Boost
+      COMPONENTS
+          filesystem
+          program_options
+          thread
+      REQUIRED
+  )
 
-include(compatibility/boost)
+  include(compatibility/boost)
+endif()
 
 set(everest-framework_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lib/everest/framework)
 set(everest-framework_BINARY_DIR ${CMAKE_BINARY_DIR}/lib/everest/framework)
@@ -151,6 +174,9 @@ if(NOT DISABLE_EDM)
 
     # edm
     add_subdirectory(applications/dependency_manager)
+    if(GRPC_EDM)
+        enable_language(ASM)
+    endif()
 
     evc_setup_edm()
 
@@ -159,51 +185,61 @@ if(NOT DISABLE_EDM)
     endif()
 
     # ev-cli and everest-testing
-    add_subdirectory(applications/utils)
+    if(NOT EVEREST_LIBS_ONLY)
+        add_subdirectory(applications/utils)
+    endif()
 else()
-    find_package(PalSigslot REQUIRED)
+    if(NOT EVEREST_LIBS_ONLY)
+        find_package(PalSigslot REQUIRED)
+        if(EVEREST_DEPENDENCY_ENABLED_LIBNFC_NCI)
+            find_package(libnfc-nci REQUIRED)
+        endif()
+        find_package(pugixml REQUIRED)
+        find_package(CURL 7.84.0 REQUIRED)
+        find_package(ftxui 6 QUIET) # optional, if not available BringUp module will not be built
+        find_package(sdbus-c++ REQUIRED)
 
-    find_package(libnfc-nci REQUIRED)
-
-    find_package(pugixml REQUIRED)
-    find_package(CURL 7.84.0 REQUIRED)
-    find_package(ryml REQUIRED)
-    find_package(nlohmann_json REQUIRED)
-
-    find_package(ftxui 6 QUIET) # optional, if not available BringUp module will not be built
-
-    find_package(sdbus-c++ REQUIRED)
-
-    find_package(fmt REQUIRED)
-    find_package(date REQUIRED)
-
-    find_package(OpenSSL 3 REQUIRED)
+        # modules consume these directly; the libraries find their own
+        # external dependencies in their respective CMakeLists.txt
+        find_package(ryml REQUIRED)
+        find_package(nlohmann_json REQUIRED)
+        find_package(fmt REQUIRED)
+        find_package(date REQUIRED)
+        find_package(OpenSSL 3 REQUIRED)
+    endif()
 endif()
 
 if(EVEREST_BUILD_DOCS)
     add_subdirectory(docs)
 endif()
 
-include(ev-project-bootstrap)
+if(EVEREST_LIBS_ONLY)
+    # ev-targets provides ev_register_library_target() used by some libraries
+    include(ev-targets)
+else()
+    include(ev-project-bootstrap)
 
-ev_add_project()
+    ev_add_project()
 
-# create MF_ROOT_CA if not available
-if (ISO15118_2_GENERATE_AND_INSTALL_CERTIFICATES)
-    file(TOUCH config/certs/ca/mf/MF_ROOT_CA.pem)
+    # create MF_ROOT_CA if not available
+    if (ISO15118_2_GENERATE_AND_INSTALL_CERTIFICATES)
+        file(TOUCH config/certs/ca/mf/MF_ROOT_CA.pem)
+    endif()
 endif()
 
 add_subdirectory(lib)
 
-# config
-# FIXME (aw): this should be optional
-add_subdirectory(config)
+if(NOT EVEREST_LIBS_ONLY)
+    # config
+    # FIXME (aw): this should be optional
+    add_subdirectory(config)
 
-if(EVEREST_BUILD_APPLICATIONS)
-  add_subdirectory(applications)
+    if(EVEREST_BUILD_APPLICATIONS)
+      add_subdirectory(applications)
+    endif()
+
+    ev_install_project()
 endif()
-
-ev_install_project()
 
 # configure clang-tidy if requested
 if(CMAKE_RUN_CLANG_TIDY)
@@ -219,22 +255,25 @@ if(DOXYGEN_FOUND)
 endif()
 
 # testing
-if(EVEREST_CORE_BUILD_TESTING)
+if(EVEREST_CORE_BUILD_TESTING AND NOT EVEREST_LIBS_ONLY)
+    add_subdirectory(types)
     add_subdirectory(tests)
 else()
     message("Not running unit tests")
 endif()
 
-# convenience target for integration tests
-add_custom_target(install_everest_testing
-    COMMAND
-        if [ -z "${CPM_PACKAGE_everest-utils_SOURCE_DIR}" ] \;
-        then echo "Could not determine location of everest-utils, please install everest-testing manually!" \;
-        else echo "Found everest-utils at ${CPM_PACKAGE_everest-utils_SOURCE_DIR}" \;
-             ${Python3_EXECUTABLE} -m pip install -e "${CPM_PACKAGE_everest-utils_SOURCE_DIR}/everest-testing" \;
-        fi\;
-    DEPENDS
-        everestpy_pip_install_dist
-    COMMENT
-        "Installing dependencies for testing EVerest"
-)
+if(NOT EVEREST_LIBS_ONLY)
+    # convenience target for integration tests
+    add_custom_target(install_everest_testing
+        COMMAND
+            if [ -z "${CPM_PACKAGE_everest-utils_SOURCE_DIR}" ] \;
+            then echo "Could not determine location of everest-utils, please install everest-testing manually!" \;
+            else echo "Found everest-utils at ${CPM_PACKAGE_everest-utils_SOURCE_DIR}" \;
+                 ${Python3_EXECUTABLE} -m pip install -e "${CPM_PACKAGE_everest-utils_SOURCE_DIR}/everest-testing" \;
+            fi\;
+        DEPENDS
+            everestpy_pip_install_dist
+        COMMENT
+            "Installing dependencies for testing EVerest"
+    )
+endif()

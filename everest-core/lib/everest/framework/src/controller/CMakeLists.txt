@@ -9,16 +9,14 @@ target_compile_options(controller-ipc PRIVATE ${COMPILER_WARNING_OPTIONS})
 
 find_package(Threads REQUIRED)
 
-# FIXME (aw): refactor the yaml_loader and formatter into a lib
-# so it can be shared somehow, similar to the controller-ipc
-add_executable(controller 
+add_executable(controller
     controller.cpp
     command_api.cpp
     rpc.cpp
     server.cpp
     transpile_config.cpp
     ${PROJECT_SOURCE_DIR}/lib/formatter.cpp
-    ${PROJECT_SOURCE_DIR}/lib/yaml_loader.cpp
+    ${PROJECT_SOURCE_DIR}/lib/date.cpp
 )
 
 target_include_directories(controller PRIVATE
@@ -35,10 +33,11 @@ target_link_libraries(controller
 
         websockets_shared
         fmt::fmt
+        ryml::ryml
 
         everest::log
-
-        ryml::ryml
+        everest::yaml
+        date::date-tz
 
         ${STD_FILESYSTEM_COMPAT_LIB}
 )

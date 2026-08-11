@@ -1,6 +1,6 @@
 # OCPP2.0.1 / OCPP2.1 Functional Requirements Status
 
-This document contains the status of which OCPP 2.0.1 and OCPP2.1 numbered functional requirements (FRs) have been implemented in `libocpp`. This does not cover if the functionality is also implemented in `everest-core`.
+This document contains the status of which OCPP 2.0.1 and OCPP2.1 numbered functional requirements (FRs) have been implemented in `libocpp`. This does not cover if the functionality is also implemented in the `EVerest` module.
 
 ## Legend
 
@@ -416,40 +416,39 @@ This document contains the status of which OCPP 2.0.1 and OCPP2.1 numbered funct
 
 ## Provisioning - Setting a new NetworkConnectionProfile
 
-| ID                   | Status | Remark |
-| -------------------- | ------ | ------ |
-| B09.FR.01            | ✅     |        |
-| B09.FR.02            | ✅     |        |
-| B09.FR.03            | ✅     |        |
-| B09.FR.04            | ✅     |        |
-| B09.FR.05            |        |        |
-| B09.FR.06            |        |        |
-| B09.FR.07 <br> (2.1) |        |        |
-| B09.FR.08 <br> (2.1) |        |        |
-| B09.FR.09 <br> (2.1) |        |        |
-| B09.FR.10 <br> (2.1) |        |        |
-| B09.FR.11 <br> (2.1) |        |        |
-| B09.FR.12 <br> (2.1) |        |        |
-| B09.FR.13 <br> (2.1) |        |        |
-| B09.FR.14 <br> (2.1) |        |        |
-| B09.FR.15 <br> (2.1) |        |        |
-| B09.FR.16 <br> (2.1) |        |        |
-| B09.FR.17 <br> (2.1) |        |        |
-| B09.FR.18 <br> (2.1) |        |        |
-| B09.FR.19 <br> (2.1) |        |        |
-| B09.FR.20 <br> (2.1) |        |        |
-| B09.FR.21 <br> (2.1) |        |        |
-| B09.FR.22 <br> (2.1) |        |        |
-| B09.FR.23 <br> (2.1) |        |        |
-| B09.FR.24 <br> (2.1) |        |        |
-| B09.FR.25 <br> (2.1) |        |        |
-| B09.FR.26 <br> (2.1) |        |        |
-| B09.FR.27 <br> (2.1) |        |        |
-| B09.FR.28 <br> (2.1) |        |        |
-| B09.FR.29 <br> (2.1) |        |        |
-| B09.FR.30 <br> (2.1) |        |        |
-| B09.FR.31            |        |        |
-| B09.FR.32            |        |        |
+| ID                    | Status | Remark |
+| --------------------- | ------ | ------ |
+| B09.FR.01             | ✅     |        |
+| B09.FR.02             | ✅     |        |
+| B09.FR.03             | ✅     |        |
+| B09.FR.04             | ✅     | AllowSecurityProfileDowngrade not implemented; always rejects (spec-compliant) |
+| B09.FR.05             | ✅     |        |
+| B09.FR.06             | ✅     |        |
+| B09.FR.07 <br> (2.1)  |        | RECOMMENDATION only |
+| B09.FR.08 <br> (2.1)  | ✅     |        |
+| B09.FR.09 <br> (2.1)  | ✅     |        |
+| B09.FR.10 <br> (2.1)  | ✅     |        |
+| B09.FR.11 <br> (2.1)  | ✅     |        |
+| B09.FR.12 <br> (2.1)  | ✅     |        |
+| B09.FR.13 <br> (2.1)  | ✅     | ApnEnabled/VpnEnabled set to ReadOnly in templates |
+| B09.FR.14 <br> (2.1)  |        | CSMS recommendation |
+| B09.FR.15 <br> (2.1)  | ✅     | Unsupported network config variables reported as ReadOnly |
+| B09.FR.16 <br> (2.1)  | ✅     | Falls back to SecurityCtrlr credentials when per-slot not set |
+| B09.FR.18 <br> (2.1)  | ✅     | Uses per-slot Identity/BasicAuthPassword when set |
+| B09.FR.20 <br> (2.1)  | ✅     |        |
+| B09.FR.21 <br> (2.1)  | 🌐     |        |
+| B09.FR.22 <br> (2.1)  | ✅     | Rejects active slot with reasonCode "PriorityNetworkConf" |
+| B09.FR.23 <br> (2.1)  | ✅     |        |
+| B09.FR.26 <br> (2.1)  | ✅     | Clears per-slot Identity when SecurityCtrlr.Identity changes |
+| B09.FR.27 <br> (2.1)  | ✅     | Clears per-slot BasicAuthPassword when SecurityCtrlr changes |
+| B09.FR.28 <br> (2.1)  | ✅     | Returns per-slot Identity for GetVariables SecurityCtrlr.Identity |
+| B09.FR.29 <br> (2.1)  | 🌐     |        |
+| B09.FR.30 <br> (2.1)  | 🌐     |        |
+| B09.FR.31 <br> (2.1)  |        | AllowSecurityProfileDowngrade not implemented |
+| B09.FR.32 <br> (2.1)  |        | AllowSecurityProfileDowngrade not implemented |
+| B09.FR.33 <br> (2.1)  | ✅     | Validates added slots in NetworkConfigurationPriority |
+| B09.FR.34 <br> (2.1)  | ✅     | Rejects invalid added slots with "InvalidNetworkConf" |
+| B09.FR.35 <br> (2.1)  |        | AllowSecurityProfileDowngrade not implemented |
 
 ## Provisioning - Migrate to new CSMS
 
@@ -2033,18 +2032,21 @@ This document contains the status of which OCPP 2.0.1 and OCPP2.1 numbered funct
 
 | ID        | Status | Remark |
 | --------- | ------ | ------ |
-| K28.FR.01 |        |        |
-| K28.FR.02 |        |        |
-| K28.FR.03 |        |        |
-| K28.FR.04 |        |        |
-| K28.FR.05 |        |        |
-| K28.FR.06 |        |        |
-| K28.FR.07 |        |        |
-| K28.FR.08 |        |        |
-| K28.FR.09 |        |        |
-| K28.FR.10 |        |        |
-| K28.FR.11 |        |        |
-| K28.FR.12 |        |        |
+| K28.FR.01 | ✅     |        |
+| K28.FR.02 | ✅     |        |
+| K28.FR.03 | ✅     |        |
+| K28.FR.04 | ✅     | covered by K01.FR.122 |
+| K28.FR.05 | ✅     |        |
+| K28.FR.06 | ✅     |        |
+| K28.FR.07 | 🌐     |        |
+| K28.FR.08 | ✅     |        |
+| K28.FR.09 | ✅     | push and pull apply |
+| K28.FR.10 | ✅     | adaptive pull-dispatch timer |
+| K28.FR.11 | ✅     |        |
+| K28.FR.12 | 🌐     |        |
+| K28.FR.13 | ✅     | expiry filter + timer |
+| K28.FR.14 | ✅     | refreshes dynUpdateTime |
+| K28.FR.15 | ✅     | duration semantics |
 
 ## SmartCharging - Dynamic charging profiles by external system (New in OCPP 2.1)
 
@@ -2584,6 +2586,11 @@ This document contains the status of which OCPP 2.0.1 and OCPP2.1 numbered funct
 | V2X.03 |        |        |
 | V2X.04 |        |        |
 | V2X.05 |        |        |
+| V2X.06 |        | Not implemented — L2/L3 phase-variant rules                                                          |
+| V2X.07 |        | Not implemented — L2/L3 phase-variant rules                                                          |
+| V2X.08 |   🌐   |                                                                                                       |
+| V2X.09 |   🌐   |                                                                                                       |
+| V2X.10 |        | Partially implemented — V2X.09 branch rejects with `PhaseConflict` reasonCode for non-TxProfile periods carrying `dischargeLimit_L2/_L3` or `setpoint(Reactive)_L2/_L3`. V2X.08 branch deferred (requires per-EVSE cache of EV `v2xChargingParameters`). |
 
 ## Bidirectional Power Transfer - V2X Authorization (New in OCPP 2.1)
 
@@ -2620,13 +2627,19 @@ This document contains the status of which OCPP 2.0.1 and OCPP2.1 numbered funct
 | Q02.FR.06 |   ✅   |        |
 | Q02.FR.07 |   ✅   | The consumer of libocpp shall call `on_ev_charging_needs` when ChargeParameterDiscoveryReq is received via ISO15118       |
 
-## Bidirectional Power Transfer - Charging only (V2X control) before starting V2X (New in OCPP 2.1)
+## Bidirectional Power Transfer - Central V2X control with charging schedule (New in OCPP 2.1)
 
 | ID        | Status                        | Remark |
 | --------- | ----------------------------- | ------ |
 |           | OperationMode CentralSetpoint |        |
-| Q03.FR.01 |                               |        |
-| Q03.FR.02 |                               |        |
+| Q03.FR.01 |   🌐                          |        |
+| Q03.FR.02 |   🌐                          |        |
+| Q03.FR.03 |   🌐                          |        |
+
+## Bidirectional Power Transfer - Central V2X control with dynamic CSMS setpoint (New in OCPP 2.1)
+
+This use case adheres to requirements related to CentralSetpoint from Q03 and Dynamic charging profiles from
+K28 - Dynamic charging profiles from CSMS. There are no specific requirements for this use case.
 
 ## Bidirectional Power Transfer - External V2X setpoint control with a charging profile from CSMS (New in OCPP 2.1)
 
@@ -2705,6 +2718,18 @@ CSMS setpoint and Dynamic charging profiles from K01. There are no specific requ
 | Q10.FR.04 |        |        |
 | Q10.FR.05 |        |        |
 
+## Bidirectional Power Transfer - Going offline during V2X operation
+
+| ID  | Status | Remark |
+| --- | ------ | ------ |
+| Q11 | ✅      |Use Case doesn't contain any functional requirement|
+
+## Bidirectional Power Transfer - Resuming a V2X operation after an offline period
+
+| ID  | Status | Remark |
+| --- | ------ | ------ |
+| Q12 | ✅      | Use Case doesn't contain any functional requirement|
+
 ## DER Control - Starting a V2X session with DER control in EVSE (New in OCPP 2.1)
 
 | ID        | Status | Remark |
@@ -2734,39 +2759,57 @@ CSMS setpoint and Dynamic charging profiles from K01. There are no specific requ
 
 ## DER Control - Configure DER control settings at Charging Station (New in OCPP 2.1)
 
-| ID        | Status             | Remark |
-| --------- | ------------------ | ------ |
-|           | SetDERControl      |        |
-| R04.FR.01 |                    |        |
-| R04.FR.02 |                    |        |
-| R04.FR.03 |                    |        |
-| R04.FR.04 |                    |        |
-| R04.FR.05 |                    |        |
-| R04.FR.06 |                    |        |
-| R04.FR.07 |                    |        |
-| R04.FR.08 |                    |        |
-| R04.FR.09 |                    |        |
-| R04.FR.10 |                    |        |
-| R04.FR.11 |                    |        |
-|           | NotifyDERStartStop |        |
-| R04.FR.20 |                    |        |
-| R04.FR.21 |                    |        |
-| R04.FR.23 |                    |        |
-|           | GetDERControl      |        |
-| R04.FR.30 |                    |        |
-| R04.FR.31 |                    |        |
-| R04.FR.32 |                    |        |
-| R04.FR.33 |                    |        |
-| R04.FR.34 |                    |        |
-| R04.FR.35 |                    |        |
-| R04.FR.36 |                    |        |
-|           | ClearDERControl    |        |
-| R04.FR.40 |                    |        |
-| R04.FR.41 |                    |        |
-| R04.FR.42 |                    |        |
-| R04.FR.43 |                    |        |
-| R04.FR.44 |                    |        |
-| R04.FR.45 |                    |        |
+| ID        | Status | Remark |
+| --------- | ------ | ------ |
+|           | **SetDERControl** | |
+| R04.FR.01 | ✅     | |
+| R04.FR.02 | ✅     | |
+| R04.FR.03 | ✅     | |
+| R04.FR.04 |        | |
+| R04.FR.05 | ✅     | |
+| R04.FR.06 | ✅     | |
+| R04.FR.07 | ✅     | |
+| R04.FR.08 | ✅     | |
+| R04.FR.09 |        | |
+| R04.FR.10 | ✅     | |
+| R04.FR.11 |        | |
+| R04.FR.12 | 🌐     | |
+| R04.FR.13 | ✅     | |
+| R04.FR.14 | 🌐     | |
+| R04.FR.15 | ✅     | |
+| R04.FR.16 | ✅     | |
+| R04.FR.17 | ✅     | |
+| R04.FR.18 | ✅     | |
+| R04.FR.19 | 🌐     | |
+|           | **NotifyDERStartStop** | |
+| R04.FR.20 | ✅     | |
+| R04.FR.21 | ✅     | |
+| R04.FR.22 | ✅     | |
+|           | **GetDERControl** | |
+| R04.FR.30 | ✅     | |
+| R04.FR.31 | ✅     | |
+| R04.FR.32 | ✅     | chunk size 10 |
+| R04.FR.33 | ✅     | |
+| R04.FR.34 | ✅     | |
+| R04.FR.35 | ✅     | |
+| R04.FR.36 | ✅     | |
+| R04.FR.37 | ✅     | |
+|           | **ClearDERControl** | |
+| R04.FR.40 |        | (removed in Edition 2) |
+| R04.FR.41 | ✅     | |
+| R04.FR.42 | ✅     | |
+| R04.FR.43 | ✅     | |
+| R04.FR.44 | ✅     | |
+| R04.FR.45 | ✅     | |
+| R04.FR.46 | ✅     | |
+|           | **yUnit validation** | |
+| R04.FR.50 | ✅     | |
+| R04.FR.51 | ✅     | |
+| R04.FR.52 | ✅     | |
+| R04.FR.53 | ✅     | |
+| R04.FR.54 | ✅     | |
+| R04.FR.55 | ✅     | |
+| R04.FR.56 | ✅     | |
 
 ## DER Control - Charging station reporting a DER event (New in OCPP 2.1)
 

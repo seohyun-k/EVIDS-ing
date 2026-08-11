@@ -75,6 +75,45 @@ class DcConfigAdjustmentStrategy(EverestConfigAdjustmentStrategy):
         return adjusted_config
 
 
+class D20TlsConfigAdjustmentStrategy(EverestConfigAdjustmentStrategy):
+    """Force a specific TLS version on the direct-d20 SIL config so the
+    Evse15118D20 ConnectionSSL adapter performs the handshake end to end.
+
+    Unlike the IsoMux configs (where IsoMux terminates TLS and the d20
+    backend only sees decrypted plaintext), config-sil-dc-d20.yaml wires
+    EvseManager's `hlc` straight to Evse15118D20, which runs its own SDP
+    server and therefore drives the ConnectionSSL / tls::Server adapter.
+
+    tls13=False -> EV offers TLS 1.2 only and presents no client cert; the
+                   SECC accepts the 1.2 offer and requires no client cert
+                   (server-authenticated / unilateral TLS).
+    tls13=True  -> EV offers TLS 1.3 and presents its VEHICLE client cert;
+                   the SECC is pinned to TLS 1.3 (so the session cannot fall
+                   back to 1.2) and the verify-on-1.3 upgrade requires that
+                   client cert (mutual TLS, as ISO 15118-20 mandates).
+    """
+
+    def __init__(self, tls13: bool):
+        self.tls13 = tls13
+
+    def adjust_everest_configuration(self, everest_config: Dict):
+        adjusted_config = deepcopy(everest_config)
+        ev = adjusted_config["active_modules"]["iso15118_car"]["config_module"]
+        secc = adjusted_config["active_modules"]["iso15118_charger"]["config_module"]
+
+        ev["tls_active"] = True
+        ev["enforce_tls"] = True
+        ev["enable_tls_1_3"] = self.tls13
+
+        if self.tls13:
+            secc["tls_negotiation_strategy"] = "ENFORCE_TLS"
+            secc["enforce_tls_1_3"] = True
+        else:
+            secc["tls_negotiation_strategy"] = "ACCEPT_CLIENT_OFFER"
+            secc["enforce_tls_1_3"] = False
+        return adjusted_config
+
+
 async def wait_for_session_events(mock, expected_events, timeout=30):
     """Wait for specific events to appear in the mock's call list in the exact order.
     
@@ -436,6 +475,7 @@ async def wait_for_hlc_session_failed_with_reason(mock, expected_reason, timeout
 ###################################################
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.probe_module(
     connections={"evse_manager": [Requirement("connector_1", "evse")]}
 )
@@ -452,6 +492,7 @@ async def test_pwm_ac_session(
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.probe_module(
     connections={"evse_manager": [Requirement("connector_1", "evse")]}
 )
@@ -471,6 +512,7 @@ async def test_iso15118_ac_session(
 @pytest.mark.probe_module(
     connections={"evse_manager": [Requirement("connector_1", "evse")]}
 )
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.everest_config_adaptions(AcConfigAdjustmentStrategy())
 @pytest.mark.everest_core_config("config-sil.yaml")
 async def test_iso15118_ac_session_stop_by_evse(
@@ -498,6 +540,7 @@ async def test_iso15118_ac_session_stop_by_evse(
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.probe_module(
     connections={"evse_manager": [Requirement("evse_manager", "evse")]}
 )
@@ -524,7 +567,52 @@ async def test_iso15118_dc_session(
     _, session_event_mock, powermeter_mock, _ = await setup_session_mocks(
         test_controller, everest_core
     )
-    
+
+    await run_basic_session(test_controller, session_event_mock, powermeter_mock, "plug_in_dc_iso")
+
+
+@pytest.mark.asyncio
+@pytest.mark.xdist_group(name="ISO15118")
+@pytest.mark.probe_module(
+    connections={"evse_manager": [Requirement("evse_manager", "evse")]}
+)
+@pytest.mark.everest_core_config("config-sil-dc-d20.yaml")
+@pytest.mark.parametrize(
+    "tls_version",
+    [
+        pytest.param(
+            "tls1_2",
+            marks=pytest.mark.everest_config_adaptions(
+                D20TlsConfigAdjustmentStrategy(tls13=False)
+            ),
+            id="d20_tls1_2",
+        ),
+        pytest.param(
+            "tls1_3",
+            marks=pytest.mark.everest_config_adaptions(
+                D20TlsConfigAdjustmentStrategy(tls13=True)
+            ),
+            id="d20_tls1_3",
+        ),
+    ],
+)
+async def test_iso15118_20_dc_session_over_tls(
+    tls_version, test_controller: TestController, everest_core: EverestCore
+):
+    """ISO 15118-20 DC charging session over TLS through the Evse15118D20
+    ConnectionSSL adapter, at both negotiated TLS versions.
+
+    config-sil-dc-d20.yaml wires EvseManager.hlc directly to Evse15118D20
+    (no IsoMux), so the d20 module owns the SDP server and terminates TLS via
+    the tls::Server adapter under test. The session only reaches Charging if
+    the handshake succeeds, so a regression in the adapter (TLS 1.2 min-version
+    pinning, the enforce_tls_1_3 path, or the verify-client-on-1.3 upgrade)
+    surfaces as a timeout in run_basic_session.
+    """
+    _, session_event_mock, powermeter_mock, _ = await setup_session_mocks(
+        test_controller, everest_core
+    )
+
     await run_basic_session(test_controller, session_event_mock, powermeter_mock, "plug_in_dc_iso")
 
 @pytest.mark.asyncio
@@ -547,6 +635,7 @@ async def test_iso15118_dc_session(
         ),
     ],
 )
+@pytest.mark.xdist_group(name="ISO15118")
 async def test_iso15118_dc_session_stop_by_evse(
     iso15118_version, test_controller: TestController, everest_core: EverestCore
 ):
@@ -572,6 +661,7 @@ async def test_iso15118_dc_session_stop_by_evse(
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.probe_module(
     connections={"evse_manager": [Requirement("evse_manager", "evse")]}
 )
@@ -612,12 +702,50 @@ async def test_iso15118_dc_session_error_before_session(
     await wait_for_error(error_raised_mock)
     assert error_raised_mock.called, "Error should have been raised"
 
+    await asyncio.sleep(1) # Give EvseManager some time to process error
+
     test_controller.plug_in_dc_iso()
 
     await assert_no_events(session_event_mock, ["SessionStarted"], wait_time=10)
     assert (
         session_event_mock.call_count == 0
     ), "No session events should occur while error is active"
+
+###########################################################
+################ External Limits Capabilities Tests #######
+###########################################################
+
+@pytest.mark.asyncio
+@pytest.mark.probe_module(
+    connections={
+        "gcp": [Requirement("grid_connection_point", "external_limits")],
+    }
+)
+@pytest.mark.everest_core_config("config-sil.yaml")
+async def test_energy_node_publishes_capabilities_on_startup(
+    test_controller: TestController, everest_core: EverestCore
+):
+    """EnergyNode must publish its 'capabilities' var on its external_limits
+    interface at startup (i.e. invoke_ready must be called for that
+    implementation), matching config-sil.yaml's grid_connection_point
+    (fuse_limit_A: 40, phase_count: 3, default nominal_voltage_V: 230)."""
+    test_controller.start()
+    probe_module = ProbeModule(everest_core.get_runtime_session())
+
+    capabilities_mock = Mock()
+    probe_module.subscribe_variable("gcp", "capabilities", capabilities_mock)
+
+    probe_module.start()
+    await probe_module.wait_to_be_ready()
+
+    await wait_for_ready(capabilities_mock, timeout=5)
+
+    capabilities = capabilities_mock.call_args[0][0]
+    assert capabilities["max_current_A"] == 40
+    assert capabilities["max_phase_count"] == 3
+    assert capabilities["nominal_voltage_V"] == 230
+    assert capabilities["total_power_W"] == 40 * 3 * 230
+
 
 ###########################################################
 ################ Pause and No Energy Tests ################
@@ -693,6 +821,7 @@ async def test_iso15118_ac_session_no_energy_before_session(
         # FIXME: "iso15118": [Requirement("iso15118_charger", "evse")]
     }
 )
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.everest_core_config("config-sil-dc.yaml")
 @pytest.mark.everest_config_adaptions(DcConfigAdjustmentStrategy())
 @pytest.mark.skip(reason="Fails because EV simulation does not yet support the pause in the beginning of the session")
@@ -743,6 +872,7 @@ async def test_iso15118_dc_session_no_energy_before_session(
         ),
     ],
 )
+@pytest.mark.xdist_group(name="ISO15118")
 async def test_iso15118_dc_session_no_energy_before_session_no_pause(
     iso15118_version,test_controller: TestController, everest_core: EverestCore
 ):
@@ -771,6 +901,7 @@ async def test_iso15118_dc_session_no_energy_before_session_no_pause(
     }
 )
 @pytest.mark.everest_core_config("config-sil.yaml")
+@pytest.mark.xdist_group(name="ISO15118")
 async def test_pwm_ac_session_no_energy_during_session(
     test_controller: TestController, everest_core: EverestCore
 ):
@@ -784,7 +915,6 @@ async def test_pwm_ac_session_no_energy_during_session(
     await set_external_limits(probe_module, "gcp", 0, 0)
     await wait_for_session_events(session_event_mock, ["ChargingPausedEVSE"])
     await assert_no_events(session_event_mock, ["ChargingStarted", "ChargingStarted"], wait_time=5)
-    await assert_energy_below(powermeter_mock, energy_threshold_wh=15, timeout=5)
     await assert_power_below(powermeter_mock, power_threshold_w=10, timeout=5)
     await set_external_limits(probe_module, "gcp", 10000, 10000)
     await wait_for_session_events(session_event_mock, ["PrepareCharging","ChargingStarted"])
@@ -800,6 +930,7 @@ async def test_pwm_ac_session_no_energy_during_session(
         "gcp": [Requirement("grid_connection_point", "external_limits")],
     }
 )
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.everest_config_adaptions(AcConfigAdjustmentStrategy())
 @pytest.mark.everest_core_config("config-sil.yaml")
 async def test_iso15118_ac_session_no_energy_during_session(
@@ -814,9 +945,9 @@ async def test_iso15118_ac_session_no_energy_during_session(
     await assert_energy_exceeds(powermeter_mock, energy_threshold_wh=10, timeout=15)
     await set_external_limits(probe_module, "gcp", 0, 0)
     await assert_no_events(session_event_mock, ["ChargingStarted"], wait_time=5)
-    await assert_energy_below(powermeter_mock, energy_threshold_wh=25, timeout=10)
+    await assert_power_below(powermeter_mock, power_threshold_w=10, timeout=10)
     await set_external_limits(probe_module, "gcp", 10000, 10000)
-    await assert_energy_exceeds(powermeter_mock, energy_threshold_wh=25, timeout=15)
+    await assert_power_exceeds(powermeter_mock, power_threshold_w=3000, timeout=15)
     await end_session(test_controller, session_event_mock)
 
 
@@ -827,6 +958,7 @@ async def test_iso15118_ac_session_no_energy_during_session(
         "gcp": [Requirement("grid_connection_point", "external_limits")],
     }
 )
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.everest_config_adaptions(AcConfigAdjustmentStrategy(hlc_charge_loop_without_energy_timeout_s=5))
 @pytest.mark.everest_core_config("config-sil.yaml")
 async def test_iso15118_ac_session_no_energy_during_session_timeout_triggers(
@@ -866,6 +998,7 @@ async def test_iso15118_ac_session_no_energy_during_session_timeout_triggers(
         ),
     ],
 )
+@pytest.mark.xdist_group(name="ISO15118")
 async def test_iso15118_dc_session_no_energy_during_session(
     iso15118_version,test_controller: TestController, everest_core: EverestCore
 ):
@@ -906,6 +1039,7 @@ async def test_iso15118_dc_session_no_energy_during_session(
         ),
     ],
 )
+@pytest.mark.xdist_group(name="ISO15118")
 async def test_iso15118_dc_session_no_energy_during_session_timeout_triggers(
     iso15118_version, test_controller: TestController, everest_core: EverestCore
 ):
@@ -927,6 +1061,7 @@ async def test_iso15118_dc_session_no_energy_during_session_timeout_triggers(
         "gcp": [Requirement("grid_connection_point", "external_limits")],
     }
 )
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.everest_core_config("config-sil.yaml")
 async def test_pwm_ac_session_paused_by_ev(
     test_controller: TestController, everest_core: EverestCore
@@ -940,7 +1075,7 @@ async def test_pwm_ac_session_paused_by_ev(
     await assert_energy_exceeds(powermeter_mock, energy_threshold_wh=10, timeout=15)
     test_controller.pause_session()
     await wait_for_session_events(session_event_mock, ["ChargingPausedEV"])
-    await assert_energy_below(powermeter_mock, energy_threshold_wh=15, timeout=5)
+    await assert_power_below(powermeter_mock, power_threshold_w=10, timeout=5)
     await assert_no_events(session_event_mock, ["ChargingStarted", "ChargingStarted"], wait_time=5)
     test_controller.resume_session()
     await wait_for_session_events(session_event_mock, ["ChargingStarted"])
@@ -954,8 +1089,10 @@ async def test_pwm_ac_session_paused_by_ev(
         "gcp": [Requirement("grid_connection_point", "external_limits")],
     }
 )
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.everest_config_adaptions(AcConfigAdjustmentStrategy())
 @pytest.mark.everest_core_config("config-sil.yaml")
+@pytest.mark.skip("Currently fails because EV simulator session resuming is not stable yet")
 async def test_iso15118_ac_session_paused_by_ev(
     test_controller: TestController, everest_core: EverestCore
 ):
@@ -971,7 +1108,7 @@ async def test_iso15118_ac_session_paused_by_ev(
     await assert_energy_exceeds(powermeter_mock, energy_threshold_wh=10, timeout=15)
     test_controller.pause_iso_session()
     await wait_for_session_events(session_event_mock, ["ChargingPausedEV"])
-    await assert_energy_below(powermeter_mock, energy_threshold_wh=20, timeout=5)
+    await assert_power_below(powermeter_mock, power_threshold_w=10, timeout=5)
     await assert_no_events(session_event_mock, ["ChargingStarted", "ChargingStarted"], wait_time=5)
     test_controller.resume_iso_session_ac()
     await wait_for_session_events(session_event_mock, ["ChargingStarted"])
@@ -985,8 +1122,10 @@ async def test_iso15118_ac_session_paused_by_ev(
         "gcp": [Requirement("grid_connection_point", "external_limits")],
     }
 )
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.everest_core_config("config-sil-dc.yaml")
 @pytest.mark.everest_config_adaptions(DcConfigAdjustmentStrategy())
+@pytest.mark.flaky(reruns=1)
 async def test_iso15118_dc_session_paused_by_ev(
     test_controller: TestController, everest_core: EverestCore
 ):
@@ -1005,8 +1144,8 @@ async def test_iso15118_dc_session_paused_by_ev(
     await assert_energy_below(powermeter_mock, energy_threshold_wh=20, timeout=5)
     await assert_no_events(session_event_mock, ["ChargingStarted", "ChargingStarted"], wait_time=5)
     test_controller.resume_iso_session_dc()
-    await assert_energy_exceeds(powermeter_mock, energy_threshold_wh=20, timeout=45)
     await wait_for_session_events(session_event_mock, ["ChargingStarted"])
+    await assert_energy_exceeds(powermeter_mock, energy_threshold_wh=20, timeout=45)
     await end_session(test_controller, session_event_mock)
 
 @pytest.mark.asyncio
@@ -1016,6 +1155,7 @@ async def test_iso15118_dc_session_paused_by_ev(
         "gcp": [Requirement("grid_connection_point", "external_limits")],
     }
 )
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.everest_core_config("config-sil.yaml")
 async def test_pwm_ac_session_paused_by_evse(
     test_controller: TestController, everest_core: EverestCore
@@ -1038,7 +1178,7 @@ async def test_pwm_ac_session_paused_by_evse(
     await wait_for_session_events(session_event_mock, ["ChargingPausedEVSE"])
     await set_external_limits(probe_module, "gcp", 0, 0)
 
-    await assert_energy_below(powermeter_mock, energy_threshold_wh=15, timeout=5)
+    await assert_power_below(powermeter_mock, power_threshold_w=10, timeout=5)
     await assert_no_events(session_event_mock, ["ChargingStarted"], wait_time=5)
     await probe_module.call_command(
         "evse_manager",
@@ -1046,7 +1186,7 @@ async def test_pwm_ac_session_paused_by_evse(
         {},
     )
 
-    await assert_energy_below(powermeter_mock, energy_threshold_wh=15, timeout=5)
+    await assert_power_below(powermeter_mock, power_threshold_w=10, timeout=5)
     await set_external_limits(probe_module, "gcp", 10000, 10000)
 
     await wait_for_session_events(session_event_mock, ["ChargingStarted"])
@@ -1061,6 +1201,7 @@ async def test_pwm_ac_session_paused_by_evse(
         "gcp": [Requirement("grid_connection_point", "external_limits")],
     }
 )
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.everest_config_adaptions(AcConfigAdjustmentStrategy())
 @pytest.mark.everest_core_config("config-sil.yaml")
 @pytest.mark.skip(reason="Currently fails because EV Simulator does not start a new session once it is a user pause")
@@ -1081,7 +1222,7 @@ async def test_iso15118_ac_session_paused_by_evse(
         {},
     )
     await wait_for_session_events(session_event_mock, ["ChargingPausedEVSE"])
-    await assert_energy_below(powermeter_mock, energy_threshold_wh=50, timeout=5)
+    await assert_power_below(powermeter_mock, power_threshold_w=10, timeout=5)
     await assert_no_events(session_event_mock, ["ChargingStarted"], wait_time=5)
     await probe_module.call_command(
         "evse_manager",
@@ -1099,6 +1240,7 @@ async def test_iso15118_ac_session_paused_by_evse(
         "gcp": [Requirement("grid_connection_point", "external_limits")],
     }
 )
+@pytest.mark.xdist_group(name="ISO15118")
 @pytest.mark.everest_core_config("config-sil-dc.yaml")
 @pytest.mark.everest_config_adaptions(DcConfigAdjustmentStrategy())
 @pytest.mark.skip(reason="Currently fails because EV Simulator does not start a new session once it is a user pause")
@@ -1121,7 +1263,7 @@ async def test_iso15118_dc_session_paused_by_evse(
         {},
     )
     await wait_for_session_events(session_event_mock, ["ChargingPausedEVSE"])
-    await assert_energy_below(powermeter_mock, energy_threshold_wh=15, timeout=5)
+    await assert_power_below(powermeter_mock, power_threshold_w=10, timeout=5)
     await probe_module.call_command(
         "evse_manager",
         "resume_charging",

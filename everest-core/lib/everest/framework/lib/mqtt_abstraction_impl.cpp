@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <limits>
+#include <memory>
 #include <thread>
 
 #include <fcntl.h>
@@ -21,73 +23,80 @@
 #include <fmt/format.h>
 
 #include <everest/exceptions.hpp>
+#include <everest/io/mqtt/mosquitto_cpp.hpp>
+#include <everest/io/mqtt/mqtt_client.hpp>
 #include <everest/logging.hpp>
 
 #include <utils/mqtt_abstraction_impl.hpp>
 
 namespace Everest {
-const auto mqtt_keep_alive = 600;
-const auto mqtt_get_timeout_ms = 5000; ///< Timeout for MQTT get in milliseconds
+constexpr auto mqtt_keep_alive = 20;
+constexpr auto mqtt_get_timeout_ms = 5000;       ///< Timeout for MQTT get in milliseconds
+constexpr auto mqtt_reconnect_timeout_ms = 2000; ///< MQTT reconnect timeout
+
+namespace {
+everest::lib::io::mqtt::mqtt_client::QoS to_io_qos(Everest::QOS qos,
+                                                   everest::lib::io::mqtt::mqtt_client::QoS default_qos) {
+    switch (qos) {
+    case QOS::QOS0:
+        return everest::lib::io::mqtt::mqtt_client::QoS::at_most_once;
+        break;
+    case QOS::QOS1:
+        return everest::lib::io::mqtt::mqtt_client::QoS::at_least_once;
+        break;
+    case QOS::QOS2:
+        return everest::lib::io::mqtt::mqtt_client::QoS::exactly_once;
+        break;
+
+    default:
+        break;
+    }
+    return default_qos;
+}
+} // namespace
 
 MessageWithQOS::MessageWithQOS(const std::string& topic, const std::string& payload, QOS qos, bool retain) :
     Message{topic, payload}, qos(qos), retain(retain) {
 }
 
-MQTTAbstractionImpl::MQTTAbstractionImpl(const std::string& mqtt_server_address, const std::string& mqtt_server_port,
-                                         const std::string& mqtt_everest_prefix,
-                                         const std::string& mqtt_external_prefix) :
-    message_queue(([this](const Message& message) { this->on_mqtt_message(message); })),
-    mqtt_server_address(mqtt_server_address),
-    mqtt_server_port(mqtt_server_port),
-    mqtt_everest_prefix(mqtt_everest_prefix),
-    mqtt_external_prefix(mqtt_external_prefix),
-    mqtt_client{},
-    sendbuf{},
-    recvbuf{} {
+MQTTAbstractionImpl::MQTTAbstractionImpl(const MQTTSettings& mqtt_settings) :
+    mqtt_everest_prefix(mqtt_settings.everest_prefix),
+    mqtt_external_prefix(mqtt_settings.external_prefix),
+    running(true) {
     BOOST_LOG_FUNCTION();
 
     EVLOG_debug << "Initializing MQTT abstraction layer...";
 
-    this->mqtt_is_connected = false;
-
-    this->mqtt_client.publish_response_callback_state = &this->message_queue;
-
-    this->disconnect_event_fd = eventfd(0, 0);
-    if (this->disconnect_event_fd == -1) {
-        throw EverestInternalError("Could not setup eventfd for disconnect event");
+    if (mqtt_settings.uses_socket()) {
+        this->mqtt_server_socket_path = mqtt_settings.broker_socket_path;
+    } else {
+        this->mqtt_server_address = mqtt_settings.broker_host;
+        this->mqtt_server_port = mqtt_settings.broker_port;
     }
-}
-
-MQTTAbstractionImpl::MQTTAbstractionImpl(const std::string& mqtt_server_socket_path,
-                                         const std::string& mqtt_everest_prefix,
-                                         const std::string& mqtt_external_prefix) :
-    message_queue(([this](const Message& message) { this->on_mqtt_message(message); })),
-    mqtt_server_socket_path(mqtt_server_socket_path),
-    mqtt_everest_prefix(mqtt_everest_prefix),
-    mqtt_external_prefix(mqtt_external_prefix),
-    mqtt_client{},
-    sendbuf{},
-    recvbuf{} {
-    BOOST_LOG_FUNCTION();
-
-    EVLOG_debug << "Initializing MQTT abstraction layer...";
 
     this->mqtt_is_connected = false;
 
-    this->mqtt_client.publish_response_callback_state = &this->message_queue;
-
-    this->disconnect_event_fd = eventfd(0, 0);
-    if (this->disconnect_event_fd == -1) {
-        throw EverestInternalError("Could not setup eventfd for disconnect event");
-    }
+    this->mqtt_client = std::make_unique<everest::lib::io::mqtt::mqtt_client>(mqtt_reconnect_timeout_ms);
+    this->mqtt_client->set_error_handler([](int error, std::string const& msg) {
+        if (error) {
+            EVLOG_error << fmt::format("MQTT error: {}", msg);
+        }
+    });
+    this->mqtt_client->set_callback_connect([this](auto& mqtt, auto, auto, auto const&) { this->on_mqtt_connect(); });
+    this->mqtt_client->set_callback_disconnect([this](auto& mqtt, auto, auto const&) { this->on_mqtt_disconnect(); });
 }
 
 MQTTAbstractionImpl::~MQTTAbstractionImpl() {
-    // FIXME (aw): verify that disconnecting is thread-safe!
-    if (this->mqtt_is_connected) {
-        disconnect();
-    }
-    // this->mqtt_mainloop_thread.join();
+    // Signal the main loop to stop (if it is still running). The actual
+    // mqtt_client->disconnect() runs on the main loop thread itself, which is joined when
+    // the mqtt_mainloop_thread member is destroyed.
+    this->disconnect();
+
+    // Stop and join all MessageHandler worker threads before the remaining members are
+    // destroyed. A worker thread may still be executing a handler; joining here guarantees
+    // no handler runs against a partially-destroyed object. stop() is idempotent, so calling
+    // it again (here and in ~MessageHandler()) is safe.
+    this->message_handler.stop();
 }
 
 bool MQTTAbstractionImpl::connect() {
@@ -99,21 +108,39 @@ bool MQTTAbstractionImpl::connect() {
 
     if (!this->mqtt_server_socket_path.empty()) {
         EVLOG_debug << fmt::format("Connecting to MQTT broker: {}", this->mqtt_server_socket_path);
-        return connectBroker(this->mqtt_server_socket_path);
+        const auto result = this->mqtt_client->connect(this->mqtt_server_socket_path, mqtt_keep_alive);
+        return (result == everest::lib::io::mqtt::ErrorCode::Success);
     } else {
         EVLOG_debug << fmt::format("Connecting to MQTT broker: {}:{}", this->mqtt_server_address,
                                    this->mqtt_server_port);
-        return connectBroker(this->mqtt_server_address.c_str(), this->mqtt_server_port.c_str());
+        try {
+            const auto result =
+                this->mqtt_client->connect("", this->mqtt_server_address, this->mqtt_server_port, mqtt_keep_alive);
+            return (result == everest::lib::io::mqtt::ErrorCode::Success);
+        } catch (std::exception& e) {
+            EVLOG_critical << fmt::format("Could not connect to MQTT broker: {}", e.what());
+        }
+
+        return false;
     }
 }
 
 void MQTTAbstractionImpl::disconnect() {
     BOOST_LOG_FUNCTION();
 
-    mqtt_disconnect(&this->mqtt_client);
-    // FIXME(kai): always set connected to false for the moment
-    this->mqtt_is_connected = false;
-    eventfd_write(this->disconnect_event_fd, 1);
+    // Only signal the main loop to stop; do NOT call mqtt_client->disconnect() here.
+    // disconnect() can be invoked from arbitrary threads (e.g. the external MQTT worker
+    // thread via Everest::handle_shutdown(), or the main thread during teardown). The
+    // actual mqtt_client->disconnect() is performed by the main loop thread after
+    // ev_handler.run() returns (see spawn_main_loop_thread()), keeping all mqtt_client
+    // access on a single thread and avoiding a concurrent-access / use-after-free crash.
+    this->running = false;
+    this->disconnect_event.notify();
+}
+
+void MQTTAbstractionImpl::stop_message_handling() {
+    BOOST_LOG_FUNCTION();
+    this->message_handler.stop();
 }
 
 void MQTTAbstractionImpl::publish(const std::string& topic, const json& json) {
@@ -141,47 +168,71 @@ void MQTTAbstractionImpl::publish(const std::string& topic, const std::string& d
         return;
     }
 
-    auto publish_flags = 0;
-    switch (qos) {
-    case QOS::QOS0:
-        publish_flags = MQTT_PUBLISH_QOS_0;
-        break;
-    case QOS::QOS1:
-        publish_flags = MQTT_PUBLISH_QOS_1;
-        break;
-    case QOS::QOS2:
-        publish_flags = MQTT_PUBLISH_QOS_2;
-        break;
-
-    default:
-        break;
-    }
+    auto mqtt_qos = to_io_qos(qos, everest::lib::io::mqtt::mqtt_client::QoS::at_most_once);
 
     if (retain) {
-        publish_flags |= MQTT_PUBLISH_RETAIN;
         if (not(data.empty() and qos == QOS::QOS0)) {
             // topic should be retained, so save the topic in retained_topics
             // do not save the topic when the payload is empty and QOS is set to 0 which means a retained topic is to be
             // cleared
-            const std::lock_guard<std::mutex> lock(topics_mutex);
-            this->retained_topics.push_back(topic);
+            auto handle = this->managed_topics.handle();
+            handle->retained_topics.push_back(topic);
         }
     }
 
-    if (!this->mqtt_is_connected) {
-        const std::lock_guard<std::mutex> lock(messages_before_connected_mutex);
-        this->messages_before_connected.push_back(std::make_shared<MessageWithQOS>(topic, data, qos, retain));
-        return;
+    {
+        auto handle = messages_before_connected.handle();
+        if (!this->mqtt_is_connected) {
+            handle->push_back(std::make_shared<MessageWithQOS>(topic, data, qos, retain));
+            return;
+        }
     }
 
-    const MQTTErrors error = mqtt_publish(&this->mqtt_client, topic.c_str(), data.c_str(), data.size(), publish_flags);
-    if (error != MQTT_OK) {
-        EVLOG_error << fmt::format("MQTT Error {}", mqtt_error_str(error));
+    const auto error = this->mqtt_client->publish(topic, data, mqtt_qos, retain, {});
+    if (error != everest::lib::io::mqtt::ErrorCode::Success) {
+        EVLOG_error << "MQTT error during publishing";
     }
-    notify_write_data();
 
-    EVLOG_verbose << fmt::format("publishing to topic: {} with payload: {} and qos: {}", topic, data,
-                                 static_cast<int>(qos));
+    EVLOG_verbose << fmt::format("publishing to topic: {} with payload: {} and qos: {} and retain: {}", topic, data,
+                                 static_cast<int>(qos), static_cast<int>(retain));
+}
+
+bool MQTTAbstractionImpl::set_lwt(const std::string& topic, const json& json, QOS qos, bool retain) {
+    BOOST_LOG_FUNCTION();
+
+    return set_lwt(topic, json.dump(), qos, retain);
+}
+
+bool MQTTAbstractionImpl::set_lwt(const std::string& topic, const std::string& data, QOS qos, bool retain) {
+    BOOST_LOG_FUNCTION();
+
+    if (topic.empty()) {
+        EVLOG_warning << "Ignoring last-will-testament with empty topic";
+        return false;
+    }
+
+    // An MQTT connection allows only a single last-will-testament, and it must be registered before connect().
+    if (this->mqtt_is_connected) {
+        EVLOG_error << "Cannot set last-will-testament after the MQTT connection has been established";
+        return false;
+    }
+    if (this->lwt_set) {
+        EVLOG_error << "A last-will-testament has already been set; it can only be set once";
+        return false;
+    }
+
+    const auto mqtt_qos = to_io_qos(qos, everest::lib::io::mqtt::mqtt_client::QoS::at_most_once);
+    const auto error = this->mqtt_client->set_will(topic, data, mqtt_qos, retain, {});
+    if (error != everest::lib::io::mqtt::ErrorCode::Success) {
+        EVLOG_error << "MQTT error while setting last-will-testament";
+        // leave lwt_set false so a corrected call may retry
+        return false;
+    }
+
+    this->lwt_set = true;
+    EVLOG_verbose << fmt::format("set last-will-testament on topic: {} with payload: {} and qos: {} and retain: {}",
+                                 topic, data, static_cast<int>(qos), static_cast<int>(retain));
+    return true;
 }
 
 void MQTTAbstractionImpl::subscribe(const std::string& topic) {
@@ -192,146 +243,125 @@ void MQTTAbstractionImpl::subscribe(const std::string& topic) {
 
 void MQTTAbstractionImpl::subscribe(const std::string& topic, QOS qos) {
     BOOST_LOG_FUNCTION();
-    const std::lock_guard<std::mutex> lock(topics_mutex);
+    auto max_qos_level = to_io_qos(qos, everest::lib::io::mqtt::mqtt_client::QoS::at_most_once);
 
-    auto max_qos_level = 0;
-    switch (qos) {
-    case QOS::QOS0:
-        max_qos_level = 0;
-        break;
-    case QOS::QOS1:
-        max_qos_level = 1;
-        break;
-    case QOS::QOS2:
-        max_qos_level = 2;
-        break;
-    default:
-        break;
-    }
+    auto handle = this->managed_topics.handle();
+    handle->subscribed_topics.insert(topic);
 
-    this->subscribed_topics.insert(topic);
-
-    mqtt_subscribe(&this->mqtt_client, topic.c_str(), max_qos_level);
-    notify_write_data();
+    this->ev_handler.add_action([this, topic, max_qos_level]() {
+        const auto result = this->mqtt_client->subscribe(
+            topic,
+            [this, topic]([[maybe_unused]] everest::lib::io::mqtt::mosquitto_cpp& client,
+                          everest::lib::io::mqtt::mosquitto_cpp::message const& message) {
+                this->message_queue.emplace(message.topic, message.payload);
+                this->new_message_event.notify();
+            },
+            max_qos_level);
+    });
 }
 
 void MQTTAbstractionImpl::unsubscribe(const std::string& topic) {
     BOOST_LOG_FUNCTION();
-    const std::lock_guard<std::mutex> lock(topics_mutex);
+    auto handle = this->managed_topics.handle();
 
-    if (this->subscribed_topics.find(topic) == this->subscribed_topics.end()) {
+    if (handle->subscribed_topics.find(topic) == handle->subscribed_topics.end()) {
         EVLOG_warning << fmt::format("Tried to unsubscribe from topic {} but it was not subscribed", topic);
         return;
     }
 
-    EVLOG_debug << fmt::format("Unsubscribing from topic: {}", topic);
+    EVLOG_verbose << fmt::format("Unsubscribing from topic: {}", topic);
 
-    this->subscribed_topics.erase(topic);
-
-    mqtt_unsubscribe(&this->mqtt_client, topic.c_str());
-    notify_write_data();
+    handle->subscribed_topics.erase(topic);
+    this->ev_handler.add_action([this, topic]() { this->mqtt_client->unsubscribe(topic, {}); });
 }
 
 void MQTTAbstractionImpl::clear_retained_topics() {
     BOOST_LOG_FUNCTION();
-    const std::lock_guard<std::mutex> lock(topics_mutex);
+    auto handle = this->managed_topics.handle();
 
-    for (const auto& retained_topic : retained_topics) {
+    for (const auto& retained_topic : handle->retained_topics) {
         this->publish(retained_topic, std::string(), QOS::QOS0, true);
         EVLOG_verbose << "Cleared retained topic: " << retained_topic;
     }
 
-    retained_topics.clear();
+    handle->retained_topics.clear();
 }
 
-json MQTTAbstractionImpl::get(const std::string& topic, QOS qos) {
+json MQTTAbstractionImpl::get(const MQTTRequest& request, std::size_t retries) {
     BOOST_LOG_FUNCTION();
-    std::lock_guard<std::mutex> lock(topic_request_mutex);
+    std::size_t attempt = 0;
+    while (attempt <= retries) {
+        try {
+            return this->get_internal(request);
+        } catch (const EverestTimeoutError& error) {
+            if (attempt < retries) {
+                attempt += 1;
+            } else {
+                std::rethrow_exception(std::current_exception());
+            }
+        }
+    }
+    EVLOG_AND_THROW(
+        EverestInternalError(fmt::format("Unknown error while waiting for result of get({})", request.response_topic)));
+}
 
+std::unique_ptr<MQTTAbstraction> make_mqtt_abstraction(const MQTTSettings& mqtt_settings) {
+    return std::make_unique<MQTTAbstractionImpl>(mqtt_settings);
+}
+
+json MQTTAbstractionImpl::get(const std::string& topic, QOS qos, std::size_t retries) {
+    BOOST_LOG_FUNCTION();
+    const MQTTRequest request = {topic, qos};
+    return this->get(request, retries);
+}
+
+const std::string& MQTTAbstractionImpl::get_everest_prefix() const {
+    BOOST_LOG_FUNCTION();
+    return mqtt_everest_prefix;
+}
+
+const std::string& MQTTAbstractionImpl::get_external_prefix() const {
+    BOOST_LOG_FUNCTION();
+    return mqtt_external_prefix;
+}
+
+nlohmann::json MQTTAbstractionImpl::get_internal(const MQTTRequest& request) {
+    BOOST_LOG_FUNCTION();
     std::promise<json> res_promise;
     std::future<json> res_future = res_promise.get_future();
 
-    const auto res_handler = [this, &res_promise](const std::string& /*topic*/, json data) {
-        res_promise.set_value(std::move(data));
-    };
-
-    const std::shared_ptr<TypedHandler> res_token =
-        std::make_shared<TypedHandler>(HandlerType::GetConfigResponse, std::make_shared<Handler>(res_handler));
-    this->register_handler(
-        topic, res_token,
-        QOS::QOS2); // without the lock guard, response handlers could be overriden if called from different threads
-
-    // wait for result future
-    const std::chrono::time_point<std::chrono::steady_clock> res_wait =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(mqtt_get_timeout_ms);
-    std::future_status res_future_status = std::future_status::deferred;
-    do {
-        res_future_status = res_future.wait_until(res_wait);
-    } while (res_future_status == std::future_status::deferred);
-
-    json result;
-    if (res_future_status == std::future_status::timeout) {
-        this->unregister_handler(topic, res_token);
-        EVLOG_AND_THROW(EverestTimeoutError(fmt::format("Timeout while waiting for result of get()")));
-    }
-    if (res_future_status == std::future_status::ready) {
-        result = res_future.get();
-    }
-    this->unregister_handler(topic, res_token);
-
-    return result;
-}
-
-json MQTTAbstractionImpl::get(const MQTTRequest& request) {
-    BOOST_LOG_FUNCTION();
-    std::lock_guard<std::mutex> lock(topic_request_mutex);
-
-    std::promise<json> res_promise;
-    std::future<json> res_future = res_promise.get_future();
-
+    // Why repsonse by value, wouldn't a reference do?
     const auto res_handler = [&res_promise](const std::string& /*topic*/, json response) {
         res_promise.set_value(std::move(response));
     };
 
     // FIXME: use configurable HandlerType?
-    const std::shared_ptr<TypedHandler> res_token =
+    const auto res_token =
         std::make_shared<TypedHandler>(HandlerType::GetConfigResponse, std::make_shared<Handler>(res_handler));
     this->register_handler(request.response_topic, res_token, request.qos);
     if (request.request_topic.has_value()) {
-        json req_data;
         if (request.request_data.has_value()) {
-            req_data = json::parse(request.request_data.value());
+            MqttMessagePayload payload{MqttMessageType::GetConfig, json::parse(request.request_data.value())};
+            this->publish(request.request_topic.value(), payload, request.qos);
+        } else {
+            MqttMessagePayload payload{MqttMessageType::GetConfig, json{}};
+            this->publish(request.request_topic.value(), payload, request.qos);
         }
-
-        MqttMessagePayload payload{MqttMessageType::GetConfig, req_data};
-        this->publish(request.request_topic.value(), payload, request.qos);
     }
     // wait for result future
-    const std::chrono::time_point<std::chrono::steady_clock> res_wait =
-        std::chrono::steady_clock::now() + request.timeout;
-    std::future_status res_future_status = std::future_status::deferred;
-    do {
-        res_future_status = res_future.wait_until(res_wait);
-    } while (res_future_status == std::future_status::deferred);
+    auto res_future_status = res_future.wait_for(request.timeout);
 
-    json result;
     if (res_future_status == std::future_status::timeout) {
         this->unregister_handler(request.response_topic, res_token);
         EVLOG_AND_THROW(
             EverestTimeoutError(fmt::format("Timeout while waiting for result of get({})", request.response_topic)));
     }
     if (res_future_status == std::future_status::ready) {
-        result = res_future.get();
+        this->unregister_handler(request.response_topic, res_token);
+        return res_future.get();
     }
 
-    this->unregister_handler(request.response_topic, res_token);
-
-    return result;
-}
-
-void MQTTAbstractionImpl::notify_write_data() {
-    // FIXME (aw): error handling
-    eventfd_write(this->event_fd, 1);
+    return json{};
 }
 
 std::shared_future<void> MQTTAbstractionImpl::spawn_main_loop_thread() {
@@ -339,47 +369,22 @@ std::shared_future<void> MQTTAbstractionImpl::spawn_main_loop_thread() {
 
     std::packaged_task<void(void)> task([this]() {
         try {
-            while (this->mqtt_is_connected) {
-                eventfd_t eventfd_buffer; // NOLINT(cppcoreguidelines-init-variables) initialized by eventfd_read
-                std::array<struct pollfd, 3> pollfds = {{{this->mqtt_socket_fd, POLLIN, 0},
-                                                         {this->event_fd, POLLIN, 0},
-                                                         {this->disconnect_event_fd, POLLIN, 0}}};
-                auto retval = ::poll(pollfds.data(), pollfds.size(), mqtt_poll_timeout_ms);
+            this->ev_handler.register_event_handler(this->mqtt_client.get());
+            this->ev_handler.register_event_handler(&this->disconnect_event,
+                                                    [this](const auto&) { this->running = false; });
+            this->ev_handler.register_event_handler(&this->new_message_event,
+                                                    [this](const auto&) { on_mqtt_message(); });
 
-                if (retval >= 0) {
-                    // data available to send (the notifier writes, we should be ready to read)
-                    if (retval > 0) {
-                        // check for disconnect event
-                        if (pollfds[2].revents & POLLIN) {
-                            break;
-                        }
-                        // check for write notification and reset it
-                        if (pollfds[1].revents & POLLIN) {
-                            // FIXME (aw): check for failure
-                            eventfd_read(this->event_fd, &eventfd_buffer);
-                        }
-                    }
+            this->ev_handler.run(this->running);
 
-                    if (retval == 0) {
-                        // nothing to send or receive however, need to send the keep alive message
-                        // otherwise the brocker will disconnect the client
-                        // mqtt_sync might send this automatically but ocasionally might miss it
-                        mqtt_ping(&this->mqtt_client);
-                    }
-
-                    // send and receive messages
-                    const MQTTErrors error = mqtt_sync(&this->mqtt_client);
-                    if (error != MQTT_OK) {
-                        EVLOG_error << fmt::format("Error during MQTT sync: {}", mqtt_error_str(error));
-
-                        on_mqtt_disconnect();
-
-                        return;
-                    }
-                } else {
-                    // probably we got hit by a signal, nothing to do, just reloop
-                }
+            // The loop has been asked to stop (running == false). Perform the actual MQTT
+            // disconnect here, on the loop-owning thread, so that mqtt_client is never
+            // accessed concurrently from another thread (disconnect() only signals; see
+            // disconnect()).
+            if (this->mqtt_client) {
+                this->mqtt_client->disconnect();
             }
+            this->mqtt_is_connected = false;
         } catch (boost::exception& e) {
             EVLOG_critical << fmt::format("Caught MQTT mainloop boost::exception:\n{}",
                                           boost::diagnostic_information(e, true));
@@ -401,7 +406,17 @@ std::shared_future<void> MQTTAbstractionImpl::get_main_loop_future() {
     return this->main_loop_future;
 }
 
-void MQTTAbstractionImpl::on_mqtt_message(const Message& message) {
+void MQTTAbstractionImpl::on_mqtt_message() {
+    while (true) {
+        auto msg = message_queue.pop();
+        if (not msg.has_value()) {
+            break;
+        }
+        handle_mqtt_message(msg.value());
+    }
+}
+
+void MQTTAbstractionImpl::handle_mqtt_message(const Message& message) {
     BOOST_LOG_FUNCTION();
 
     EVLOG_verbose << "Incoming MQTT message. topic: " << message.topic << " payload: " << message.payload;
@@ -410,13 +425,13 @@ void MQTTAbstractionImpl::on_mqtt_message(const Message& message) {
     const auto& payload = message.payload;
 
     try {
-        json data;
-        bool is_everest_topic = false;
-        if (topic.find(mqtt_everest_prefix) == 0) {
+        std::string_view topic_view = topic;
+        std::string_view mqtt_everest_prefix_view = mqtt_everest_prefix;
+        if (topic_view.size() >= mqtt_everest_prefix_view.size() &&
+            topic_view.compare(0, mqtt_everest_prefix_view.size(), mqtt_everest_prefix_view) == 0) {
             EVLOG_verbose << fmt::format("topic {} starts with {}", topic, mqtt_everest_prefix);
-            is_everest_topic = true;
             try {
-                data = json::parse(payload);
+                this->message_handler.add(ParsedMessage{std::move(topic), json::parse(payload.begin(), payload.end())});
             } catch (nlohmann::detail::parse_error& e) {
                 EVLOG_warning << fmt::format("Could not decode json for incoming topic '{}': {}", topic, payload);
                 return;
@@ -424,17 +439,13 @@ void MQTTAbstractionImpl::on_mqtt_message(const Message& message) {
         } else {
             EVLOG_debug << fmt::format("Message parsing for topic '{}' not implemented. Wrapping in json object.",
                                        topic);
-            data = json(payload);
+            this->message_handler.add(ParsedMessage{std::move(topic), std::move(payload)});
         }
-
-        bool found = false;
-
-        this->message_handler.add(ParsedMessage{topic, std::move(data)});
-    } catch (boost::exception& e) {
+    } catch (const boost::exception& e) {
         EVLOG_critical << fmt::format("Caught MQTT on_message boost::exception:\n{}",
                                       boost::diagnostic_information(e, true));
         exit(1);
-    } catch (std::exception& e) {
+    } catch (const std::exception& e) {
         EVLOG_critical << fmt::format("Caught MQTT on_message std::exception:\n{}",
                                       boost::diagnostic_information(e, true));
         exit(1);
@@ -446,19 +457,31 @@ void MQTTAbstractionImpl::on_mqtt_connect() {
 
     EVLOG_debug << "Connected to MQTT broker";
 
-    // this will allow new handlers to subscribe directly, if needed
+    // Drain the messages_before_connected under the lock, then publish outside it.
+    // publish() itself acquires the same monitor lock, so calling it
+    // while holding the handle would deadlock
+    shared_messages to_publish;
     {
-        const std::lock_guard<std::mutex> lock(messages_before_connected_mutex);
+        auto handle = messages_before_connected.handle();
         this->mqtt_is_connected = true;
-        for (auto& message : this->messages_before_connected) {
-            this->publish(message->topic, message->payload, message->qos, message->retain);
-        }
-        this->messages_before_connected.clear();
+        to_publish = std::move(*handle);
+    }
+    for (auto& message : to_publish) {
+        this->publish(message->topic, message->payload, message->qos, message->retain);
     }
 }
 
 void MQTTAbstractionImpl::on_mqtt_disconnect() {
     BOOST_LOG_FUNCTION();
+
+    // On intentional shutdown running is set to false (by disconnect()) before the main loop
+    // thread performs mqtt_client->disconnect(), so the resulting disconnect callback must be
+    // ignored instead of being treated as a broker crash.
+    if (!this->running.load()) {
+        EVLOG_info << "MQTT disconnect ignored (intentional shutdown)";
+        this->mqtt_is_connected = false;
+        return;
+    }
 
     EVLOG_AND_THROW(EverestInternalError("Lost connection to MQTT broker"));
 }
@@ -467,15 +490,15 @@ void MQTTAbstractionImpl::register_handler(const std::string& topic, std::shared
     BOOST_LOG_FUNCTION();
 
     auto subscription_required = [this](const std::string& topic) {
-        const std::lock_guard<std::mutex> lock(topics_mutex);
-        return std::find(this->subscribed_topics.begin(), this->subscribed_topics.end(), topic) ==
-               this->subscribed_topics.end();
+        auto handle = this->managed_topics.handle();
+        return std::find(handle->subscribed_topics.begin(), handle->subscribed_topics.end(), topic) ==
+               handle->subscribed_topics.end();
     };
 
     this->message_handler.register_handler(topic, handler);
 
     if (subscription_required(topic)) {
-        EVLOG_debug << fmt::format("Subscribing to {}", topic);
+        EVLOG_verbose << fmt::format("Subscribing to {}", topic);
         this->subscribe(topic, qos);
     }
 }
@@ -483,180 +506,11 @@ void MQTTAbstractionImpl::register_handler(const std::string& topic, std::shared
 void MQTTAbstractionImpl::unregister_handler(const std::string& topic, const Token& token) {
     BOOST_LOG_FUNCTION();
 
-    EVLOG_debug << fmt::format("Unregistering handler {} for {}", fmt::ptr(&token), topic);
+    EVLOG_verbose << fmt::format("Unregistering handler {} for {}", fmt::ptr(&token), topic);
 
     if (this->mqtt_is_connected) {
         this->unsubscribe(topic);
     }
-}
-
-bool MQTTAbstractionImpl::connectBroker(std::string& socket_path) {
-    BOOST_LOG_FUNCTION();
-
-    /* open the non-blocking TCP socket (connecting to the broker) */
-    mqtt_socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (mqtt_socket_fd == -1) {
-        EVLOG_error << fmt::format("Failed to open socket: {}", strerror(errno));
-        return false;
-    }
-
-    // Initialize the address structure
-    struct sockaddr_un addr; // NOLINT(cppcoreguidelines-pro-type-member-init): initialized with memset
-    memset(&addr, 0, sizeof(struct sockaddr_un));
-    addr.sun_family = AF_UNIX;
-    if (socket_path.size() > (sizeof(addr.sun_path) - 1)) {
-        EVLOG_error << fmt::format("the given path for the unix domain socket: {} is too big", socket_path);
-        close(mqtt_socket_fd);
-        return false;
-    }
-    // no need to set the terminating null due to memset
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-    std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
-
-    // make non-blocking
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): We have no good alternative to fcntl
-    auto retval = fcntl(mqtt_socket_fd, F_SETFL,
-                        fcntl(mqtt_socket_fd, F_GETFL) | O_NONBLOCK); // NOLINT: We have no good alternative to fcntl
-    if (retval != 0) {
-        EVLOG_error << fmt::format("Failed to set nonblock for unix domain socket: {}", socket_path);
-        close(mqtt_socket_fd);
-        return false;
-    }
-
-    // connect the socket
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): we have no good alterative to reinterpret_cast here
-    if (::connect(mqtt_socket_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(struct sockaddr_un)) == -1) {
-        EVLOG_error << fmt::format("Failed to connect to unix domain socket: {}", socket_path);
-        close(mqtt_socket_fd);
-        return false;
-    }
-
-    this->event_fd = eventfd(0, 0);
-    if (this->event_fd == -1) {
-        close(this->mqtt_socket_fd);
-        EVLOG_error << "Could not setup eventfd for mqttc io";
-        return false;
-    }
-
-    mqtt_init(&this->mqtt_client, mqtt_socket_fd, this->sendbuf.data(), sizeof(this->sendbuf), this->recvbuf.data(),
-              sizeof(this->recvbuf), MQTTAbstractionImpl::publish_callback);
-    const uint8_t connect_flags = MQTT_CONNECT_CLEAN_SESSION;
-    /* Send connection request to the broker. */
-    if (mqtt_connect(&this->mqtt_client, nullptr, nullptr, nullptr, 0, nullptr, nullptr, connect_flags,
-                     mqtt_keep_alive) != MQTT_OK) {
-        return false;
-    }
-    // TODO(kai): async?
-    const auto error = mqtt_sync(&this->mqtt_client);
-    if (error != MQTT_OK) {
-        EVLOG_error << fmt::format("Error during MQTT sync: {}", mqtt_error_str(error));
-        return false;
-    }
-
-    on_mqtt_connect();
-    return true;
-}
-
-bool MQTTAbstractionImpl::connectBroker(const char* host, const char* port) {
-    BOOST_LOG_FUNCTION();
-
-    /* open the non-blocking TCP socket (connecting to the broker) */
-    mqtt_socket_fd = open_nb_socket(host, port);
-
-    if (mqtt_socket_fd == -1) {
-        EVLOG_error << fmt::format("Failed to open socket: {}", strerror(errno));
-        return false;
-    }
-
-    this->event_fd = eventfd(0, 0);
-    if (this->event_fd == -1) {
-        close(this->mqtt_socket_fd);
-        EVLOG_error << "Could not setup eventfd for mqttc io";
-        return false;
-    }
-
-    // Set TCP_NODELAY option. To take full advantage, this should also be set in mosquitto config.
-    // This avoids about 40ms latency on small MQTT publishes
-    int enable = 1;
-    setsockopt(mqtt_socket_fd, IPPROTO_TCP, TCP_NODELAY, &enable, sizeof(enable));
-
-    mqtt_init(&this->mqtt_client, mqtt_socket_fd, this->sendbuf.data(), sizeof(this->sendbuf), this->recvbuf.data(),
-              sizeof(this->recvbuf), MQTTAbstractionImpl::publish_callback);
-    const uint8_t connect_flags = MQTT_CONNECT_CLEAN_SESSION;
-    /* Send connection request to the broker. */
-    if (mqtt_connect(&this->mqtt_client, nullptr, nullptr, nullptr, 0, nullptr, nullptr, connect_flags,
-                     mqtt_keep_alive) != MQTT_OK) {
-        return false;
-    }
-    // TODO(kai): async?
-    const auto error = mqtt_sync(&this->mqtt_client);
-    if (error != MQTT_OK) {
-        EVLOG_error << fmt::format("Error during MQTT sync: {}", mqtt_error_str(error));
-        return false;
-    }
-
-    on_mqtt_connect();
-    return true;
-}
-
-int MQTTAbstractionImpl::open_nb_socket(const char* addr, const char* port) {
-    BOOST_LOG_FUNCTION();
-
-    struct addrinfo hints = {0, 0, 0, 0, 0, 0, 0, 0};
-
-    hints.ai_family = AF_UNSPEC;     /* IPv4 or IPv6 */
-    hints.ai_socktype = SOCK_STREAM; /* Must be TCP */
-    int sockfd = -1;
-    int rv = 0;
-    struct addrinfo* p = nullptr;
-    struct addrinfo* servinfo = nullptr;
-
-    /* get address information */
-    rv = getaddrinfo(addr, port, &hints, &servinfo);
-    if (rv != 0) {
-        // fprintf(stderr, "Failed to open socket (getaddrinfo): %s\n",
-        // gai_strerror(rv));
-        return -1;
-    }
-
-    /* open the first possible socket */
-    for (p = servinfo; p != nullptr; p = p->ai_next) {
-        sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (sockfd == -1) {
-            continue;
-        }
-
-        /* connect to server */
-        rv = ::connect(sockfd, p->ai_addr, p->ai_addrlen);
-        if (rv == -1) {
-            close(sockfd);
-            sockfd = -1;
-            continue;
-        }
-        break;
-    }
-
-    /* free servinfo */
-    freeaddrinfo(servinfo);
-
-    /* make non-blocking */
-    if (sockfd != -1) {
-        fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL) | O_NONBLOCK); // NOLINT: We have no good alternative to fcntl
-    }
-
-    /* return the new socket fd */
-    return sockfd;
-}
-
-void MQTTAbstractionImpl::publish_callback(void** state, struct mqtt_response_publish* published) {
-    BOOST_LOG_FUNCTION();
-
-    auto message_queue = static_cast<MessageQueue*>(*state);
-
-    // topic_name and application_message are NOT null-terminated, hence copy construct strings
-    message_queue->add(std::unique_ptr<Message>(new Message{
-        std::string(static_cast<const char*>(published->topic_name), published->topic_name_size),
-        std::string(static_cast<const char*>(published->application_message), published->application_message_size)}));
 }
 
 } // namespace Everest

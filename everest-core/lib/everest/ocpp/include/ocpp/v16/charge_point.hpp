@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2020 - 2023 Pionix GmbH and Contributors to EVerest
+// Copyright 2020 - 2026 Pionix GmbH and Contributors to EVerest
 #ifndef OCPP_V16_CHARGE_POINT_HPP
 #define OCPP_V16_CHARGE_POINT_HPP
 
 #include <ocpp/common/cistring.hpp>
+#include <ocpp/common/connectivity_manager.hpp>
 #include <ocpp/common/evse_security.hpp>
 #include <ocpp/common/evse_security_impl.hpp>
 #include <ocpp/common/support_older_cpp_versions.hpp>
@@ -69,10 +70,22 @@ public:
     /// security_configuration must be set
     /// \param security_configuration specifies the file paths that are required to set up the internal evse_security
     /// implementation
-    explicit ChargePoint(ChargePointConfigurationInterface& cfg, const fs::path& share_path,
-                         const fs::path& database_path, const fs::path& sql_init_path, const fs::path& message_log_path,
-                         const std::shared_ptr<EvseSecurity> evse_security,
-                         const std::optional<SecurityConfiguration> security_configuration = std::nullopt);
+    /// \param message_callback A callback that will get all OCPP messages sent or received to/from the CSMS
+    explicit ChargePoint(
+        ChargePointConfigurationInterface& cfg, const fs::path& share_path, const fs::path& database_path,
+        const fs::path& sql_init_path, const fs::path& message_log_path,
+        const std::shared_ptr<EvseSecurity> evse_security,
+        const std::optional<SecurityConfiguration> security_configuration = std::nullopt,
+        const std::function<void(const std::string& message, MessageDirection direction)>& message_callback = nullptr);
+
+    /// \brief Constructor that allows providing a \p connectivity_manager .
+    explicit ChargePoint(
+        ChargePointConfigurationInterface& cfg, const fs::path& share_path, const fs::path& database_path,
+        const fs::path& sql_init_path, const fs::path& message_log_path,
+        const std::shared_ptr<EvseSecurity> evse_security,
+        std::shared_ptr<ocpp::ConnectivityManagerInterface> connectivity_manager,
+        const std::optional<SecurityConfiguration> security_configuration = std::nullopt,
+        const std::function<void(const std::string& message, MessageDirection direction)>& message_callback = nullptr);
 
     virtual ~ChargePoint();
 
@@ -125,9 +138,11 @@ public:
     /// not stop transactions with this session_id even in case it has an internal database entry for this session and
     /// it hasnt been stopped yet. Its ignored if this vector contains session_ids that are unknown to libocpp.
     ///  \return
+    /// \param start_connecting if true (default) the websocket connection is initiated as part of start(). If false
+    /// connecting is deferred until an explicit connect_websocket() call.
     bool start(const std::map<int, ChargePointStatus>& connector_status_map = {},
                BootReasonEnum bootreason = BootReasonEnum::PowerUp,
-               const std::set<std::string>& resuming_session_ids = {});
+               const std::set<std::string>& resuming_session_ids = {}, bool start_connecting = true);
 
     /// \brief Restarts the ChargePoint if it has been stopped before. The ChargePoint is reinitialized, connects to the
     /// websocket and starts to communicate OCPP messages again
@@ -152,6 +167,27 @@ public:
 
     /// \brief Disconnects the the websocket connection to the CSMS if it is connected
     void disconnect_websocket();
+
+    /// \brief Rebuilds the cached network connection profiles and slot priority list from the configuration.
+    /// Call after network-related configuration (NetworkConfiguration components, NetworkConfigurationPriority)
+    /// was changed externally, e.g. via the EVerest ocpp interface. Does not affect an active connection; the
+    /// updated profiles take effect on the next (re)connect attempt.
+    void reload_network_profiles();
+
+    /// \brief Notifies the charge point that the websocket is connected. This allows an external owner of an injected
+    /// ConnectivityManager to drive the charge point's websocket lifecycle (mirroring ocpp::v2::ChargePointInterface).
+    void on_websocket_connected(const int configuration_slot,
+                                const ocpp::v2::NetworkConnectionProfile& network_connection_profile,
+                                const ocpp::OcppProtocolVersion ocpp_version);
+
+    /// \brief Notifies the charge point that the websocket is disconnected. This allows an external owner of an
+    /// injected ConnectivityManager to drive the charge point's websocket lifecycle
+    void on_websocket_disconnected(const int configuration_slot,
+                                   const ocpp::v2::NetworkConnectionProfile& network_connection_profile);
+
+    /// \brief Notifies the charge point that the websocket connection failed. This allows an external owner of an
+    /// injected ConnectivityManager to drive the charge point's websocket lifecycle
+    void on_websocket_connection_failed(ocpp::ConnectionFailedReason reason);
 
     /// \brief Calls the set_connection_timeout_callback that can be registered. This function is used to notify an
     /// Authorization mechanism about a changed ConnectionTimeout configuration key.
@@ -290,9 +326,11 @@ public:
     /// \param energy_wh_import stop meter value in Wh
     /// \param id_tag_end
     /// \param signed_meter_value e.g. in OCMF format
+    /// \param start_signed_meter_value e.g. in OCMF format
     void on_transaction_stopped(const std::int32_t connector, const std::string& session_id, const Reason& reason,
                                 ocpp::DateTime timestamp, float energy_wh_import,
-                                std::optional<CiString<20>> id_tag_end, std::optional<std::string> signed_meter_value);
+                                std::optional<CiString<20>> id_tag_end, std::optional<std::string> signed_meter_value,
+                                std::optional<std::string> start_signed_meter_value);
 
     /// \brief This function should be called when EV indicates that it suspends charging on the given \p connector
     /// \param connector
@@ -345,8 +383,11 @@ public:
     /// \param request_id A \p request_id of -1 indicates a FirmwareStatusNotification.req, else a
     /// SignedFirmwareUpdateStatusNotification.req .
     /// \param firmware_update_status The \p firmware_update_status
+    /// \param disable_connectors_during_install By default, all connectors will be disabled before installing the
+    /// firmware update. Setting this parameter to false will keep the connectors available during the update.
     void on_firmware_update_status_notification(std::int32_t request_id,
-                                                const ocpp::FirmwareStatusNotification firmware_update_status);
+                                                const ocpp::FirmwareStatusNotification firmware_update_status,
+                                                const bool disable_connectors_during_install = true);
 
     /// \brief This function must be called when a reservation is started at the given \p connector .
     /// \param connector
@@ -512,6 +553,14 @@ public:
     /// \param callback
     void register_set_connection_timeout_callback(const std::function<void(std::int32_t connection_timeout)>& callback);
 
+    /// \brief registers a \p callback that is called before each websocket connection attempt so the host can
+    /// configure (e.g. bring up) the network interface for the network connection profile. OCPP 1.6 has a single
+    /// implicit profile (configuration slot 1, ocppInterface Any) synthesized from CentralSystemURI/SecurityProfile.
+    /// The returned future is awaited (60 s default timeout) before connecting; an unsuccessful result skips the
+    /// connection attempt and schedules a retry. Must be called before start().
+    /// \param callback
+    void register_configure_network_connection_profile_callback(ConfigureNetworkConnectionProfileCallback callback);
+
     /// \brief registers a \p callback function that can be used to check if a reset is allowed . The
     /// is_reset_allowed_callback is called when a Reset.req is received.
     /// \param callback
@@ -616,6 +665,12 @@ public:
     /// \ingroup ocpp16_callbacks
     void register_tariff_message_callback(
         const std::function<DataTransferResponse(const TariffMessage& message)>& tariff_message_callback);
+
+    /// \brief Registers a callback function for the default price. The callback is called on startup and whenever the
+    /// applicable default price changes (e.g. after a connectivity state change or a configuration update).
+    /// \param callback  Called with the currently applicable default price text.
+    /// \ingroup ocpp16_callbacks
+    void register_default_price_callback(const std::function<void(const TariffMessage& message)>& callback);
 
     /// \brief Register a callback function for display messages (used in California Pricing Requirements)
     /// \param set_display_message_callback The callback.

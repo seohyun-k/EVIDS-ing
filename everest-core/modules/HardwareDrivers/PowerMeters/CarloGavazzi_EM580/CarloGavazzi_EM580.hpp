@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2020 - 2026 Pionix GmbH and Contributors to EVerest
-
 #ifndef CARLO_GAVAZZI_EM580_HPP
 #define CARLO_GAVAZZI_EM580_HPP
 
@@ -13,6 +12,7 @@
 
 // headers for provided interface implementations
 #include <generated/interfaces/powermeter/Implementation.hpp>
+#include <generated/interfaces/temperature_sensor/Implementation.hpp>
 
 // headers for required interface implementations
 #include <generated/interfaces/serial_communication_hub/Interface.hpp>
@@ -29,10 +29,16 @@ class CarloGavazzi_EM580 : public Everest::ModuleBase {
 public:
     CarloGavazzi_EM580() = delete;
     CarloGavazzi_EM580(const ModuleInfo& info, std::unique_ptr<powermeterImplBase> p_main,
+                       std::unique_ptr<temperature_sensorImplBase> p_temperature_sensor,
                        std::unique_ptr<serial_communication_hubIntf> r_modbus, Conf& config) :
-        ModuleBase(info), p_main(std::move(p_main)), r_modbus(std::move(r_modbus)), config(config){};
+        ModuleBase(info),
+        p_main(std::move(p_main)),
+        p_temperature_sensor(std::move(p_temperature_sensor)),
+        r_modbus(std::move(r_modbus)),
+        config(config){};
 
     const std::unique_ptr<powermeterImplBase> p_main;
+    const std::unique_ptr<temperature_sensorImplBase> p_temperature_sensor;
     const std::unique_ptr<serial_communication_hubIntf> r_modbus;
     const Conf& config;
 

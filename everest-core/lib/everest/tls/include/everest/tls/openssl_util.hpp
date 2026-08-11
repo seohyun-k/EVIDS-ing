@@ -263,6 +263,11 @@ bool sha_512(const void* data, std::size_t len, sha_512_digest_t& digest);
  * \param[in] text the base64 string (does not need to be \0 terminated)
  * \param[in] len the length of the string (excluding any terminating \0)
  * \return binary array or empty on error
+ * \note tolerates stray '\t', '\n', '\v', '\f', '\r', ' ' (matching
+ *       EVP_Decode*'s B64_WS set); other non-alphabet bytes cause the
+ *       underlying BIO_f_base64 to fail and an empty vector is returned.
+ *       An embedded '\0' terminates the scan: anything past the first
+ *       '\0' is ignored.
  */
 std::vector<std::uint8_t> base64_decode(const char* text, std::size_t len);
 
@@ -538,6 +543,14 @@ using log_handler_t = void (*)(log_level_t level, const std::string& err);
  *         where there is no previous handler
  */
 log_handler_t set_log_handler(log_handler_t handler);
+
+/**
+ * \brief return true when the supported_versions extension payload lists TLS 1.3
+ * \param[in] in pointer to the extension payload (1-byte length prefix followed by 2-byte version IDs)
+ * \param[in] inlen length of the payload in bytes
+ * \return true when the payload advertises TLS 1.3
+ */
+bool is_tls_1_3(const std::uint8_t* in, std::size_t inlen);
 
 } // namespace openssl
 

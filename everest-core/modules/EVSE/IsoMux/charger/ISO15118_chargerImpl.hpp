@@ -13,6 +13,10 @@
 #include "../IsoMux.hpp"
 
 // ev@75ac1216-19eb-4182-a85c-820f1fc2c091:v1
+#include <mutex>
+#include <optional>
+#include <unordered_map>
+
 #include "v2g.hpp"
 extern struct v2g_context* v2g_ctx;
 // ev@75ac1216-19eb-4182-a85c-820f1fc2c091:v1
@@ -51,6 +55,8 @@ protected:
     virtual void handle_stop_charging(bool& stop) override;
     virtual void handle_pause_charging(bool& pause) override;
     virtual void handle_no_energy_pause_charging(types::iso15118::NoEnergyPauseMode& mode) override;
+    virtual bool
+    handle_update_supported_app_protocols(types::iso15118::SupportedAppProtocols& supported_app_protocols) override;
     virtual void handle_update_energy_transfer_modes(
         std::vector<types::iso15118::EnergyTransferMode>& supported_energy_transfer_modes) override;
     virtual void handle_update_ac_max_current(double& max_current) override;
@@ -81,6 +87,17 @@ private:
 
     // ev@3370e4dd-95f4-47a9-aaec-ea76f34a66c9:v1
     // insert your private definitions here
+    types::iso15118::SupportedAppProtocols supported_app_protocols; // aggregated set of protocols from iso2/iso20
+    std::mutex supported_app_protocols_mutex;                       // guards shared protocol state
+    enum class ProtocolSource {
+        Iso2,
+        Iso20
+    };
+    std::unordered_map<types::iso15118::SupportedAppProtocol, ProtocolSource>
+        protocol_sources; // tracks which instance advertised each protocol
+
+    std::optional<types::iso15118::SupportedAppProtocols>
+    merge_supported_app_protocols(const types::iso15118::SupportedAppProtocols& value, ProtocolSource source);
     // ev@3370e4dd-95f4-47a9-aaec-ea76f34a66c9:v1
 };
 

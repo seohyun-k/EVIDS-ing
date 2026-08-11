@@ -1,84 +1,72 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2020 - 2025 Pionix GmbH and Contributors to EVerest
+// Copyright 2020 - 2026 Pionix GmbH and Contributors to EVerest
 
 #include "auth/codec.hpp"
 #include "auth/API.hpp"
 #include "auth/json_codec.hpp"
 #include "nlohmann/json.hpp"
 #include "utilities/constants.hpp"
+#include "utilities/json_codec_helpers.hpp"
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace everest::lib::API::V1_0::types::auth {
 
 std::string serialize(AuthorizationStatus val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(CertificateStatus val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(TokenValidationStatus val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(SelectionAlgorithm val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(AuthorizationType val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(IdTokenType val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(CustomIdToken const& val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(IdToken const& val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(WithdrawAuthorizationResult val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(ProvidedIdToken const& val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(TokenValidationStatusMessage const& val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(ValidationResult const& val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(ValidationResultUpdate const& val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::string serialize(WithdrawAuthorizationRequest const& val) noexcept {
-    json result = val;
-    return result.dump(json_indent);
+    return utilities::dump_json(val);
 }
 
 std::ostream& operator<<(std::ostream& os, AuthorizationStatus const& val) {
@@ -151,88 +139,60 @@ std::ostream& operator<<(std::ostream& os, WithdrawAuthorizationRequest const& v
     return os;
 }
 
-template <> AuthorizationStatus deserialize(std::string const& val) {
-    auto data = json::parse(val);
-    AuthorizationStatus obj = data;
-    return obj;
+template <> AuthorizationStatus deserialize(std::string_view val) {
+    return utilities::parse_json<AuthorizationStatus>(val);
 }
 
-template <> CertificateStatus deserialize<>(std::string const& val) {
-    auto data = json::parse(val);
-    CertificateStatus obj = data;
-    return obj;
+template <> CertificateStatus deserialize(std::string_view val) {
+    return utilities::parse_json<CertificateStatus>(val);
 }
 
-template <> TokenValidationStatus deserialize<>(std::string const& val) {
-    auto data = json::parse(val);
-    TokenValidationStatus obj = data;
-    return obj;
+template <> TokenValidationStatus deserialize(std::string_view val) {
+    return utilities::parse_json<TokenValidationStatus>(val);
 }
 
-template <> SelectionAlgorithm deserialize<>(std::string const& val) {
-    auto data = json::parse(val);
-    SelectionAlgorithm obj = data;
-    return obj;
+template <> SelectionAlgorithm deserialize(std::string_view val) {
+    return utilities::parse_json<SelectionAlgorithm>(val);
 }
 
-template <> AuthorizationType deserialize<>(std::string const& val) {
-    auto data = json::parse(val);
-    AuthorizationType obj = data;
-    return obj;
+template <> AuthorizationType deserialize(std::string_view val) {
+    return utilities::parse_json<AuthorizationType>(val);
 }
 
-template <> IdTokenType deserialize<>(std::string const& val) {
-    auto data = json::parse(val);
-    IdTokenType obj = data;
-    return obj;
+template <> IdTokenType deserialize(std::string_view val) {
+    return utilities::parse_json<IdTokenType>(val);
 }
 
-template <> WithdrawAuthorizationResult deserialize<>(std::string const& val) {
-    auto data = json::parse(val);
-    WithdrawAuthorizationResult obj = data;
-    return obj;
+template <> WithdrawAuthorizationResult deserialize(std::string_view val) {
+    return utilities::parse_json<WithdrawAuthorizationResult>(val);
 }
 
-template <> CustomIdToken deserialize<>(const std::string& val) {
-    auto data = json::parse(val);
-    CustomIdToken obj = data;
-    return obj;
+template <> CustomIdToken deserialize(std::string_view val) {
+    return utilities::parse_json<CustomIdToken>(val);
 }
 
-template <> IdToken deserialize<>(const std::string& val) {
-    auto data = json::parse(val);
-    IdToken obj = data;
-    return obj;
+template <> IdToken deserialize(std::string_view val) {
+    return utilities::parse_json<IdToken>(val);
 }
 
-template <> ProvidedIdToken deserialize<>(const std::string& val) {
-    auto data = json::parse(val);
-    ProvidedIdToken obj = data;
-    return obj;
+template <> ProvidedIdToken deserialize(std::string_view val) {
+    return utilities::parse_json<ProvidedIdToken>(val);
 }
 
-template <> TokenValidationStatusMessage deserialize<>(const std::string& val) {
-    auto data = json::parse(val);
-    TokenValidationStatusMessage obj = data;
-    return obj;
+template <> TokenValidationStatusMessage deserialize(std::string_view val) {
+    return utilities::parse_json<TokenValidationStatusMessage>(val);
 }
 
-template <> ValidationResult deserialize<>(const std::string& val) {
-    auto data = json::parse(val);
-    ValidationResult obj = data;
-    return obj;
+template <> ValidationResult deserialize(std::string_view val) {
+    return utilities::parse_json<ValidationResult>(val);
 }
 
-template <> ValidationResultUpdate deserialize<>(const std::string& val) {
-    auto data = json::parse(val);
-    ValidationResultUpdate obj = data;
-    return obj;
+template <> ValidationResultUpdate deserialize(std::string_view val) {
+    return utilities::parse_json<ValidationResultUpdate>(val);
 }
 
-template <> WithdrawAuthorizationRequest deserialize<>(std::string const& val) {
-    auto data = json::parse(val);
-    WithdrawAuthorizationRequest obj = data;
-    return obj;
+template <> WithdrawAuthorizationRequest deserialize(std::string_view val) {
+    return utilities::parse_json<WithdrawAuthorizationRequest>(val);
 }
 
 } // namespace everest::lib::API::V1_0::types::auth

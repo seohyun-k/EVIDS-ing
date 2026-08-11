@@ -28,6 +28,11 @@ public:
     /// In order to create the Module use the `create_module` function.
     Module(const std::string& module_id, const std::string& prefix, const Everest::MQTTSettings& mqtt_settings);
 
+    /// Stops the MQTT main loop before member destruction so the
+    /// `mqtt_mainloop_thread` join inside `~MQTTAbstractionImpl` doesn't
+    /// deadlock.
+    ~Module();
+
     JsonBlob get_manifest() const;
     JsonBlob get_interface(rust::Str interface_name) const;
     rust::Vec<RsModuleConfig> get_module_configs(rust::Str module_name) const;
@@ -53,9 +58,9 @@ private:
     std::unique_ptr<Everest::Everest> handle_;
 };
 
-const Module& create_module(rust::Str module_id, rust::Str prefix, rust::Str mqtt_broker_socket_path,
-                            rust::Str mqtt_broker_host, const unsigned int& mqtt_broker_port,
-                            rust::Str mqtt_everest_prefix, rust::Str mqtt_external_prefix);
+std::unique_ptr<Module> create_module(rust::Str module_id, rust::Str prefix, rust::Str mqtt_broker_socket_path,
+                                      rust::Str mqtt_broker_host, const std::uint16_t& mqtt_broker_port,
+                                      rust::Str mqtt_everest_prefix, rust::Str mqtt_external_prefix);
 
 int init_logging(rust::Str module_id, rust::Str prefix, rust::Str logging_config_file);
 void log2cxx(int level, int line, rust::Str file, rust::Str message);

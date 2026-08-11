@@ -1,4 +1,5 @@
 load("@rules_python//python:defs.bzl", "PyInfo")
+load("//third-party/bazel/toolchains:defs.bzl", "CROSS_PYTHON_INCOMPATIBLE")
 
 def _everest_env(ctx):
     """Everest Root rule
@@ -25,15 +26,18 @@ def _everest_env(ctx):
 
     symlinks = {}
     files = []
+    py_toolchain = ctx.toolchains["@bazel_tools//tools/python:toolchain_type"]
+    py_interpreter = py_toolchain.py3_runtime.interpreter.dirname.removeprefix("external/")
     py_imports = []
     py_transitive_sources = []
-    modules = ctx.attr.modules + ctx.attr.test_modules
-    for mod in modules:
-        # Python modules get a special handling.
+
+    # Python modules get a special handling.
+    for mod in ctx.attr.modules + ctx.attr.test_modules:
         if PyInfo in mod:
             py_imports.extend(mod[PyInfo].imports.to_list())
             py_transitive_sources.extend(mod[PyInfo].transitive_sources.to_list())
 
+    for mod in ctx.attr.modules + ctx.attr.test_modules:
         # Find the manifest in the data_runfiles and use its path as prefix.
         manifest = [
             file
@@ -42,26 +46,32 @@ def _everest_env(ctx):
         ][0]
         prefix = manifest.dirname
 
-        symlinks.update(
-            {
-                "libexec/everest/modules/{0}{1}".format(
-                    mod.label.name,
-                    file.path.removeprefix(prefix),
-                ): file
-                for file in mod[DefaultInfo].data_runfiles.files.to_list()
-                if file.path.startswith(prefix)
-            },
-        )
-        [
-            files.append(file)
-            for file in mod[DefaultInfo].default_runfiles.files.to_list()
-            if not file.path.startswith(prefix)
-        ]
+        for file in mod[DefaultInfo].data_runfiles.files.to_list():
+            # Only consider files staged inside the module subdir (next to the
+            # manifest). The trailing "/" avoids matching siblings such as the
+            # raw `<name>__binary` output.
+            if not file.path.startswith(prefix + "/"):
+                continue
+            rel = file.path.removeprefix(prefix + "/")
 
-    symlinks.update({"bin/manager": ctx.attr.manager[DefaultInfo].files.to_list()[0]})
+            # The module binary and its manifest are loaded from libexec; every
+            # other staged module file (e.g. a `models/` folder) belongs in the
+            # module's share directory, where the framework looks it up at
+            # runtime as `data_dir/modules/<name>/...` (see runtime.cpp).
+            if file.basename in ["manifest.yaml", "manifest.yml"] or file.basename == mod.label.name:
+                symlinks["libexec/everest/modules/{0}/{1}".format(mod.label.name, rel)] = file
+            else:
+                symlinks["share/everest/modules/{0}/{1}".format(mod.label.name, rel)] = file
+        for file in mod[DefaultInfo].default_runfiles.files.to_list():
+            if not file.path.startswith(prefix):
+                files.append(file)
+
+    config_file = ctx.attr.config_file[DefaultInfo].files.to_list()[0]
+    config_path = "etc/everest/{0}".format(config_file.basename)
+    symlinks.update({"bin/manager_impl": ctx.attr.manager[DefaultInfo].files.to_list()[0]})
     symlinks.update(
         {
-            "etc/everest/config-sil.yaml": ctx.attr.config_file[DefaultInfo].files.to_list()[0],
+            config_path: config_file,
         },
     )
     symlinks.update(
@@ -108,42 +118,34 @@ def _everest_env(ctx):
     # For the executable we need to export the python specific variables by
     # hand.
     script = ctx.actions.declare_file("manager_wrapper.{}".format(ctx.label.name))
-    script_content = """
+    script_content = """\
 #!/bin/sh
-set -ex
-export PATH=$(realpath $(PYTHON3)):$PATH
-declare -a PYTHON_ROOTS=({})
-for i in "${{PYTHON_ROOTS[@]}}"
-do
-    export PYTHONPATH=$(realpath ../$i):$PYTHONPATH
-done
-    """.format(" ".join(py_imports))
+set -eu
+SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+export PATH="$SCRIPT_DIR/{py_interpreter}:$PATH"
+{pythonpath_lines}
+""".format(
+        py_interpreter = py_interpreter.removeprefix("external/"),
+        pythonpath_lines = "\n".join([
+            'export PYTHONPATH="$SCRIPT_DIR/{0}:$PYTHONPATH"'.format(imp)
+            for imp in py_imports
+        ]),
+    )
+
     if ctx.attr._is_test:
         script_content += """
-bin/manager --prefix . --config etc/everest/config-sil.yaml --check
-        """
-
-        if ctx.attr.test_script and ctx.attr.test_script[DefaultInfo].files.to_list():
-            script_content += """
-bin/manager --prefix . --config etc/everest/config-sil.yaml &
-PID_MANAGER=$!
-{}
-
-if ps -p $PID_MANAGER > /dev/null
-then
-    kill $PID_MANAGER
-else
-    echo "manager died"
-    exit -1
-fi
-
-            """.format(ctx.attr.test_script[DefaultInfo].files.to_list()[0].path)
-            files.append(ctx.attr.test_script[DefaultInfo].files.to_list()[0])
+exec bin/manager_impl --prefix . --config {0} --check
+        """.format(config_path)
     else:
         script_content += """
-bin/manager --prefix . --config etc/everest/config-sil.yaml
-        """
+if [ $# -gt 0 ]; then
+    exec bin/manager_impl "$@"
+else
+    exec bin/manager_impl --prefix . --config {0}
+fi
+""".format(config_path)
     ctx.actions.write(script, script_content, is_executable = True)
+    symlinks.update({"bin/manager": script})
 
     runfiles = ctx.runfiles(
         symlinks = symlinks,
@@ -166,9 +168,9 @@ ATTRS = {
     "config_file": attr.label(
         doc = """
 The EVerest configuration file. It will be linked to
-`/etc/everest/config-sil.yaml`""",
-            allow_single_file = True,
-        ),
+`/etc/everest/<basename>`""",
+        allow_single_file = True,
+    ),
     "manager": attr.label(
         doc = "The EVerest manager.",
         default = Label("//lib/everest/framework:manager"),
@@ -209,10 +211,10 @@ The list of targets with the EVerest modules under test.
 
 The rule validates that the set of provided modules matches the set of modules
 defined in the given `config_file`.""",
-            allow_files = False,
-        ),
+        allow_files = False,
+    ),
     "test_modules": attr.label_list(
-            doc = """
+        doc = """
 The list of targets with EVerest modules which are only enabled by the
 `everest.testing` framework.
 
@@ -221,10 +223,6 @@ The rule will not enforce that these modules are defined in the given
         """,
         allow_files = False,
     ),
-    "test_script": attr.label(
-        allow_single_file = True,
-        doc = "A test script which will run after the manager starts.",
-    ),
     "_validation_tool": attr.label(
         default = Label("//lib/everest/framework/bazel/validate"),
         executable = True,
@@ -232,7 +230,7 @@ The rule will not enforce that these modules are defined in the given
     ),
     "_is_test": attr.bool(
         default = False,
-        doc = "Indicates if target is test target to validate config"
+        doc = "Indicates if target is test target to validate config",
     ),
 }
 
@@ -243,9 +241,10 @@ everest_impl_env = rule(
     toolchains = ["@bazel_tools//tools/python:toolchain_type"],
 )
 
-everest_test = rule(
+_everest_impl_test = rule(
     implementation = _everest_env,
-    attrs = dict(ATTRS, _is_test=attr.bool(default=True)),
+    attrs = dict(ATTRS, _is_test = attr.bool(default = True)),
+    toolchains = ["@bazel_tools//tools/python:toolchain_type"],
     doc = """
 Creates an EVerest Test.
 
@@ -262,7 +261,6 @@ everest_test(
     name = "my_everest_env",
     modules = [":ModuleFoo", ":ModuleBar"],
     config_file = ":my_config.yaml",
-    toolchains = ["@rules_python//python:current_py_toolchain"],
     test_script=":my_test_script",
 )
 
@@ -273,7 +271,16 @@ You can run it with `bazel test`.
     test = True,
 )
 
-def everest_env(name, **kwargs):
+def everest_test(name, target_compatible_with = [], **kwargs):
+    """Wrapper around the everest_test rule that marks the target as
+    incompatible with cross-compilation platforms (no Python toolchain)."""
+    _everest_impl_test(
+        name = name,
+        target_compatible_with = CROSS_PYTHON_INCOMPATIBLE + target_compatible_with,
+        **kwargs
+    )
+
+def everest_env(name, target_compatible_with = [], **kwargs):
     """
     Creates an EVerest environment.
 
@@ -289,7 +296,6 @@ def everest_env(name, **kwargs):
         name = "my_everest_env",
         modules = [":ModuleFoo", ":ModuleBar"],
         config_file = ":my_config.yaml",
-        toolchains = ["@rules_python//python:current_py_toolchain"],
     )
 
     ```
@@ -297,5 +303,9 @@ def everest_env(name, **kwargs):
     You can either run this target with `bazel run` or pass it for example to a (py)
     test which will run your tests against the environment.
     """
-    everest_impl_env(name=name, **kwargs)
-    everest_test(name=name + "__manager_test", tags=["exclusive"],**kwargs)
+    everest_impl_env(
+        name = name,
+        target_compatible_with = CROSS_PYTHON_INCOMPATIBLE + target_compatible_with,
+        **kwargs
+    )
+    everest_test(name = name + "__manager_test", tags = ["exclusive"], target_compatible_with = target_compatible_with, **kwargs)
