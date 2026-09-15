@@ -56,7 +56,7 @@ EVerest SIL 공급기는 이상적 pass-through라 기본 정상 데이터는 �
 - `analysis/smoke_forge.cpp` — forge 산술·불변식 스모크. coherent k=0.8 전부 PASS, energy-only는 ∫검산 FAIL 확인.
 - `README.md` — 설계·근거·명령. 이 `HANDOFF.md`.
 
-**검증된 것:** 패치 적용, forge 로직 스모크, 스코프 self-test 신호, derating config 주입, conda 의존성 env solve. **아직 안 된 것:** 실제 EVerest 빌드에서의 라이브 수집·실데이터 스코프 결과.
+**검증된 것:** 패치 적용, forge 로직 스모크, 스코프 self-test 신호, derating config 주입, conda 의존성 env solve, **EVerest SIL 세션 부팅·완주(ISO/powermeter 메시지 수집)**. **아직 안 된 것:** ISO 15118 충전이 실제 전류까지 흐르는 라이브 세션(공유 서버에선 dummy 인터페이스 부재로 불가 — §7d 참조)·실데이터 스코프 결과.
 
 ## 7. 다음 단계 (서버, sudo 없이 /home/seohyunk 안에서)
 1. micromamba 설치(홈) → conda env `everest` 생성(검증된 목록: python cxx-compiler c-compiler cmake ninja make pkg-config boost-cpp openssl sqlite libcurl libcap nodejs mosquitto rsync git).
@@ -113,6 +113,17 @@ python3 Attack/A1/analysis/evaluate.py --features Attack/A1/analysis/features.cs
 분석엔 python 패키지 필요: `python -m pip install scikit-learn numpy` (xgboost는 선택).
 **주의(ev0):** collect 스크립트가 `ip link add ev0 type dummy`로 더미 인터페이스를 만드는데 이게 CAP_NET_ADMIN(보통 sudo)을 요구할 수 있음. 스모크에서 세션이 안 서면 이 지점 의심 → 관리자에게 ev0 1회 생성 요청하거나 대체 구성 필요.
 **주의(파서):** 실제 로그 스키마가 `extract_features.py` 상단 CONTRACT의 파싱 키와 다르면 조정 필요 — 스모크 로그(mqtt.log/csms.log) 샘플을 보고 iso/ocpp/powermeter 값 위치를 맞출 것.
+
+## 7d. 라이브 수집 디버깅 결과 + 컨테이너 재현 (2026-09 갱신)
+공유 서버에서 실제 수집을 처음 돌리며 파이프라인을 관통시켰다. 스모크로 발견·해결한 것:
+1. **mosquitto broker 미탐지** — 데몬이 `$CONDA_PREFIX/sbin`에 있어 PATH(bin만)에 없었음. `collect_a1.sh`가 `MOSQUITTO_BIN`으로 자동 탐지하도록 수정.
+2. **config 스키마 위반** — `dc_target_current`는 schema type **integer**인데 setpoint 랜덤화가 소수(예 23.7)를 넣어 manager가 부팅 즉시 사망. 정수 setpoint(`rand_int_range`)로 수정. (`max_current`는 number라 derate cap은 소수 OK.)
+3. **EV 시뮬레이터(PyEvJosev) 크래시** — josev 런타임 의존성(`pydantic==1.*`, environs, cryptography, aiofile, py4j …)이 빌드에서 안 깔림 → `ModuleNotFoundError`. **conda env와 build/venv 양쪽**에 `build/_deps/josev-src/requirements.txt` 설치로 해결(매니저 fallback 인터프리터가 conda env python이라 conda 쪽이 필수).
+4. **충전 전류가 0 (핵심 관문)** — ISO 15118 HLC의 **SDP link-local multicast**로 SECC(EvseV2G)↔EVCC(PyEvJosev)가 서로를 발견해야 하는데, `device: auto`가 docker bridge를 골라 SDP가 무한 timeout → PrepareCharging에서 정지 → present/powermeter/전압 전부 0. **dummy 인터페이스만 이 multicast를 loopback**함(lo는 MULTICAST 없음, docker bridge는 실측 실패). `collect_a1.sh`에 `IFACE`(기본 ev0) 추가: dummy 생성 + 세션 config에서 `device: auto`→`device: $IFACE` 고정.
+
+**공유 서버의 근본 제약:** dummy 생성은 CAP_NET_ADMIN(sudo) 필요. sudo 불가 + 비특권 user namespace는 AppArmor(`apparmor_restrict_unprivileged_userns=1`) 차단 + docker도 sudo 필요 → **이 서버에선 라이브 충전 세션 불가**. 빌드·부팅·메시지 수집까지는 되나 전류가 0이라 공격 대상 계량값이 안 생김.
+
+**재현 경로(맥북/권한 있는 리눅스): `Attack/A1/macbook/`** — Docker 이미지가 patched everest-core 빌드 + 위 4개 수정 전부 반영. `--cap-add=NET_ADMIN`로 컨테이너 안에서 `ev0` 생성 후 collect→extract→evaluate. Apple M3(arm64) 네이티브. `./Attack/A1/macbook/run_all.sh smoke` → 본수집. self-test 스코프 신호(ISO/OCPP단독 near-chance, cross F1=1.0, count-only chance)는 테스트베드 없이도 이미 재현됨.
 
 ## 8. 열린 이슈 / 주의
 - 실기 관측점: EVerest는 res 값을 버스에 publish 안 함 → 패치가 `[A1-ATTACK]` 로그로 방출, collector가 파싱. 실기에선 ISO 평문 탭.

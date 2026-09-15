@@ -38,6 +38,19 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# The mosquitto broker daemon ships in $CONDA_PREFIX/sbin under conda/micromamba,
+# which is NOT on PATH (conda exports only bin/). Locate it explicitly so
+# ensure_broker can start the broker. Override with MOSQUITTO_BIN=.
+MOSQUITTO_BIN="${MOSQUITTO_BIN:-$(command -v mosquitto || true)}"
+[ -z "$MOSQUITTO_BIN" ] && [ -n "${CONDA_PREFIX:-}" ] && [ -x "$CONDA_PREFIX/sbin/mosquitto" ] && MOSQUITTO_BIN="$CONDA_PREFIX/sbin/mosquitto"
+# ISO 15118 HLC needs a network interface that loops back SDP link-local
+# multicast so the in-host SECC (EvseV2G) and EVCC (PyEvJosev) discover each
+# other. 'device: auto' picks a bridge that does NOT loop it back -> the EV
+# retries SDPRequest forever and charging stalls at PrepareCharging (present
+# current stays 0). A dummy interface DOES loop it back, so we create $IFACE
+# (dummy) and pin both ISO modules to it. Creating a dummy needs CAP_NET_ADMIN
+# (root, or `--cap-add=NET_ADMIN` in a container). See Attack/A1/macbook/.
+IFACE="${IFACE:-ev0}"
 N_NORMAL="${N_NORMAL:-20}"
 N_ATTACK="${N_ATTACK:-20}"
 FACTORS="${FACTORS:-0.80}"
@@ -91,11 +104,20 @@ EOF
 ensure_broker() {
   mosquitto_pub -h 127.0.0.1 -t a1/ping -m x >/dev/null 2>&1 && return 0
   pkill -x mosquitto 2>/dev/null; sleep 1
-  mosquitto -c "$BROKER_CONF" -d; sleep 1
+  [ -n "$MOSQUITTO_BIN" ] || { echo "[collect] ERROR: mosquitto broker binary not found (set MOSQUITTO_BIN=)." >&2; return 1; }
+  "$MOSQUITTO_BIN" -c "$BROKER_CONF" -d; sleep 1
   mosquitto_pub -h 127.0.0.1 -t a1/ping -m x >/dev/null 2>&1
 }
 # ev0 dummy iface (ISO 15118 link-local)
-ip link show ev0 >/dev/null 2>&1 || { ip link add ev0 type dummy 2>/dev/null; ip link set ev0 up 2>/dev/null; }
+if ! ip link show "$IFACE" >/dev/null 2>&1; then
+  if ip link add "$IFACE" type dummy 2>/dev/null && ip link set "$IFACE" up 2>/dev/null; then
+    echo "[collect] created dummy interface '$IFACE' for ISO 15118 SDP"
+  else
+    echo "[collect] WARN: could not create dummy '$IFACE' (needs CAP_NET_ADMIN)." >&2
+    echo "          ISO 15118 SDP/HLC will time out and charging will not start." >&2
+    echo "          Run inside a container with --cap-add=NET_ADMIN. See Attack/A1/macbook/." >&2
+  fi
+fi
 
 # EVerest resolves --config <name> under $DIST/etc/everest/. Locate the installed
 # base config so we can derive per-session copies with a randomized setpoint.
@@ -118,7 +140,7 @@ make_session_config() {
     echo "$CFG"; return 0
   fi
   local name="config-a1-$sid"
-  sed -E "s/^([[:space:]]*dc_target_current:).*/\1 $cur/; s/^([[:space:]]*dc_target_voltage:).*/\1 $volt/" \
+  sed -E "s/^([[:space:]]*dc_target_current:).*/\1 $cur/; s/^([[:space:]]*dc_target_voltage:).*/\1 $volt/; s/^([[:space:]]*device:)[[:space:]]*auto[[:space:]]*$/\1 $IFACE/" \
       "$BASE_CFG_FILE" \
   | awk -v cap="$cap" '
       { print }
@@ -130,6 +152,11 @@ make_session_config() {
   echo "$name"
 }
 rand_range() { python3 -c "import random,sys;print(round(random.uniform(float(sys.argv[1]),float(sys.argv[2])),1))" "$1" "$2"; }
+# EvManager's dc_target_current/voltage schema type is INTEGER, so the per-session
+# setpoint must be a whole number (a float like 23.7 fails schema validation and
+# the manager aborts at boot). The supply cap (DCSupplySimulator max_current) is
+# type number, so derating may stay fractional.
+rand_int_range() { python3 -c "import random,sys;print(random.randint(int(round(float(sys.argv[1]))),int(round(float(sys.argv[2])))))" "$1" "$2"; }
 
 kill_session() {
   pkill -f 'build/dist/bin/manager' 2>/dev/null
@@ -154,7 +181,7 @@ run_one() {
   # randomized per-session setpoint (identical range for normal & attack)
   local tgt_cur=20 tgt_volt=400 sess_cfg="$CFG"
   if [ "$VARY_SETPOINT" = "1" ]; then
-    tgt_cur=$(rand_range "$SETPOINT_MIN" "$SETPOINT_MAX")
+    tgt_cur=$(rand_int_range "$SETPOINT_MIN" "$SETPOINT_MAX")
     tgt_volt=400
   fi
   # legitimate derating (normal sessions only): cap supply below target
