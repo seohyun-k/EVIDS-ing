@@ -1,117 +1,118 @@
-# A1 — Cross-protocol boundary attack (in-band present-value spoofing)
+# A1 — Cross-protocol boundary attack (coherent ISO under-report)
 
-A1 is redesigned to be the paper's **existence proof**: a concrete attack that is
-*individually valid on every single channel* yet is **detectable only by
-ISO 15118 ↔ OCPP cross-consistency**. If a single-channel detector cannot flag
-it *in principle*, then cross-protocol observation is not a "conditional
-improvement" — it is a **necessary condition** for this class.
+A1 is the paper's **ISO-side existence proof**: a compromised charging station
+under-reports metering to the EV over ISO 15118-2 while the OCPP side (power
+meter → CSMS) keeps the true values. Each channel is internally consistent, so
+neither ISO-only nor OCPP-only detection can flag it — only an ISO↔OCPP
+value cross-check (RV04 for current, an energy-consistency check for the meter
+reading) reveals the inconsistency. This is the mirror of the OCPP-side
+under-report (A3-MV/SC): same physical quantities, but the **ISO channel** is the
+one that lies.
 
-## Why the previous A1 did not prove necessity
+## Why this is genuinely cross-protocol-necessary (and the earlier attacks were not)
 
-The manuscript's A1 had two independent defects, each fatal to the claim:
+The RV01–RV06 attacks in the original design (and the old `×8` present-current
+patch) are all catchable by a **single channel**, because each forges only one
+side of ISO's request/measurement pair, in the anomalous direction, at a large
+magnitude. This attack fixes all three:
 
-1. **Additive MQTT injector (`a1_mqtt_inject.py`) → count confound.**
-   It *re-published* a forged value on the same topic instead of *replacing* the
-   original, so attack sessions carry structurally more messages. A count-only
-   feature ablation reproduced F1 = 1.000 down to 5 % intensity — the model was
-   detecting *the act of injection*, not the value inconsistency. The A1 claim
-   had to be re-scoped to "detect an unauthorized injection event."
-
-2. **The old in-band C++ patch (`*_current-spoofing.patch`) was out of range.**
-   It set `EVSEPresentCurrent.Value *= 8` and `EVSEMaximumCurrentLimit → 250 A`.
-   `×8` and a fixed 250 A limit are wildly outside the normal operating band, so
-   an ISO-only anomaly detector catches them trivially → cross observation looks
-   unnecessary. Low-intensity re-runs then hit a ceiling effect at n = 15.
-
-The fix is the **intersection** of the two approaches' good halves.
-
-## The design
-
-`patches/A1_present-value-spoofing.patch` rewrites the **outgoing** ISO 15118
-`EVSEPresentCurrent` / `EVSEPresentVoltage` inside the SECC
-(`modules/EVSE/EvseV2G/iso_server.cpp`, DIN mirror in `din_server.cpp`), at the
-moment the response is copied into the message the EV receives. It has three
-properties that together make A1 a valid existence proof:
-
-| Property | Mechanism | Kills which objection |
+| Condition | This attack | Why it matters |
 |---|---|---|
-| **In-band replace** (no extra messages) | edits `res->EVSEPresentCurrent` in place; power meter + internal control untouched | count / injection-artifact confound |
-| **Within-range value** | small multiplicative factor near 1.0 (default `A1_FACTOR=1.10`, i.e. +10 %) | "single channel already sees it out of range" |
-| **Breaks only cross-consistency** | ISO reports forged value; OCPP `MeterValues` still reports the *true* metered value → RV04 (current, ±2 %) / RV03 (voltage, ±2 %) violated | attributes detection to cross-protocol correspondence, not magnitude |
+| **DOWN direction** | present < target (report *less* than delivered) | `present ≤ target` is normal derating; `present > target` (the old ×1.1–×8 forges) is anomalous → ISO-only catches it |
+| **COHERENT** | scale present current **and** cumulative energy by the same `k` (voltage held) | energy = ∫(present·power) stays consistent within ISO; forging only the meter reading (energy-only) breaks this and is caught by the ISO-internal ∫ check |
+| **IN-RANGE** | `k` near 1 (default 0.8), setpoints randomized per session | the forged value stays inside the normal per-session distribution, so it is not a magnitude outlier |
 
-Because the power meter is never touched, ISO and OCPP disagree while **each
-value is individually a perfectly normal charging current/voltage**. ISO-only and
-OCPP-only detectors are blind to it by construction; only the cross scope
-(RV03/RV04 consistency features) can separate attack from normal. That is the
-existence proof.
+Because the power meter is never touched, OCPP MeterValues stay true, and only
+the ISO↔OCPP disagreement exposes the attack. Message counts are unchanged (a
+pure in-message value rewrite), so there is no injection/count confound.
 
-### Mandatory collection design: randomize the normal setpoint
+## Real-world validity
 
-The patch alone is **not sufficient**. If every normal session charges at one
-fixed current (e.g. the config default `dc_target_current: 20`), a forged 22 A is
-trivially separable by an ISO-only detector — the paper's ceiling effect recurs
-and cross observation looks unnecessary. The forged ISO value must land **inside
-the normal ISO marginal**, so `collect_a1.sh` randomizes `dc_target_current`
-(and voltage) per session over an **identical range for normal and attack**
-(`VARY_SETPOINT=1`, `SETPOINT_MIN/MAX`, default 10–32 A) by deriving a per-session
-config from `config-sil-dc-ocpp201.yaml` (`ev_manager_1.config_module`).
+- **Feasible on real hardware.** A compromised station fully controls the
+  `EVSEPresentCurrent` and `MeterInfo.MeterReading` it puts in the ISO 15118-2
+  `CurrentDemandRes`. An optional ISO meter *signature* does not help: the
+  compromised EVSE signs the forged value, so single-channel signature/OCMF
+  validation passes — only the cross-check catches it.
+- **The ∫ self-check is real, and this attack survives it.** On a real charger,
+  the ISO plaintext also carries `EVSEPresentCurrent/Voltage`, so an ISO-only
+  detector could integrate present power and compare against `MeterReading`.
+  Forging only the meter reading (option "energy") fails this check; the
+  **coherent** forge (current + energy by the same `k`) passes it. See the smoke
+  test below.
+- **Scope caveat (stated in the paper).** The EV's own BMS measures true battery
+  current, so the EV could locally notice. The IDS/CSMS does not have that private
+  measurement; the threat model scopes detection to the two reported streams at
+  the charger boundary.
+- **Defense.** The real countermeasure is binding ISO metering to the OCPP report
+  under one signed measurement (OCMF + ISO `MeterInfo` signature bound to the
+  OCPP-reported value). A cross-protocol IDS is the detection path where that
+  binding is not deployed.
 
-Validation on synthetic data with this design (`evaluate.py --self-test`) gives
-the intended signature — the existence proof in miniature:
+## The patch
 
-```
-scope        model    Prec  Recall    F1  AUROC
-ISO-only     RF      0.535   0.489  0.510  0.642   <- near chance (blind in principle)
-OCPP-only    RF      0.356   0.333  0.342  0.550   <- near chance
-concat       RF      0.546   0.489  0.515  0.644   <- both channels, still weak
-cross        RF      1.000   1.000  1.000  1.000   <- only correspondence separates it
-count-only   RF      0.000   0.000  0.000  0.500   <- no injection/count confound
-```
+`patches/A1_iso-coherent-underreport.patch` edits the SECC
+(`modules/EVSE/EvseV2G/iso_server.cpp`, inside `handle_iso_current_demand`) to
+rewrite the outgoing `res->EVSEPresentCurrent` and `res->MeterInfo.MeterReading`
+by factor `k`, downstream of the ISO/OCPP split (control state and power meter
+untouched). Applies cleanly to clean `everest-core` (`git apply -p1`).
 
-### Intensity sweep (the key experimental axis)
-
-The forgery factor is the independent variable. It should stay **inside** the
-normal operating band and be swept *just across* the RV tolerance:
-
-- `A1_FACTOR=1.03` — near the RV04 ±2 % edge (hardest; expect ISO-only blind, cross marginal)
-- `A1_FACTOR=1.10` — default, clearly beyond tolerance but a normal 22 A vs 20 A
-- `A1_FACTOR=1.20` — upper end still plausible
-
-The claim to establish: as the factor shrinks toward the tolerance edge,
-**ISO-only F1 collapses toward chance while cross F1 stays high** — and, unlike
-the old A1, the **count-only ablation now fails** (message counts are identical),
-so the surviving signal is genuinely the value inconsistency.
-
-## Runtime parameters (env vars, read once at first CurrentDemand)
+Runtime config (env, read once):
 
 | Var | Default | Meaning |
 |---|---|---|
-| `A1_ATTACK` | unset (off) | `1`/`true`/`yes` enables the spoof |
-| `A1_TARGET` | `present_current` | `present_current` \| `present_voltage` \| `both` |
-| `A1_FACTOR` | `1.0` (no-op) | multiplicative offset applied to the reported mantissa |
+| `A1_ATTACK` | unset (off) | `1`/`true`/`yes` enables |
+| `A1_FACTOR` | `1.0` (no-op) | scale factor `k`; `<1` = under-report (e.g. `0.8`) |
+| `A1_TARGET` | `coherent` | `coherent` (current+energy, voltage held) · `current` · `voltage` · `energy` · e.g. `current,energy` |
 
-No rebuild is needed to change intensity/target — the SECC binary reads the env
-at runtime. Build the patched SECC once, then sweep by exporting env vars per
-session (see `collect_a1.sh`).
+EVerest does not republish these `res` values on its MQTT bus, so the forged
+values are also emitted as `[A1-ATTACK] ISO …` log lines for the collector to
+observe (matching `analysis/extract_features.py`).
 
-## Build & run
+## Smoke test (runnable without building EVerest)
+
+`analysis/smoke_forge.cpp` replicates the patch's exact forge arithmetic and
+checks the attack invariants on a simulated CurrentDemand session:
 
 ```bash
-# 1. apply the attack patch onto a clean everest-core checkout
-cd everest-core
-git apply -p1 ../Attack/A1/patches/A1_present-value-spoofing.patch
-# 2. build EVerest as usual (produces build/dist)
-# 3. collect a labelled dataset (normal + attack sessions, intensity sweep)
-cd ..
-A1_FACTOR=1.10 A1_TARGET=present_current ./Attack/A1/collect_a1.sh
-# 4. features + scope comparison (ISO-only / OCPP-only / concat / cross + count-only ablation)
-python3 Attack/A1/analysis/extract_features.py --sessions Attack/A1/Attack_data --out Attack/A1/analysis/features.csv
-python3 Attack/A1/analysis/evaluate.py --features Attack/A1/analysis/features.csv
+g++ -std=c++17 -O2 Attack/A1/analysis/smoke_forge.cpp -o /tmp/a1smoke
+A1_ATTACK=1 A1_FACTOR=0.8 /tmp/a1smoke          # coherent → all 6 checks PASS
+A1_ATTACK=1 A1_FACTOR=0.8 A1_TARGET=energy /tmp/a1smoke   # meter-only → COHERENT check FAILS (ratio 0.81)
 ```
 
-## Labelling discipline (unchanged from the paper)
+The coherent run passes: present 16 A ≤ target 20 A (derating), energy/∫-power
+ratio ≈ 1.0 (ISO-internally consistent), voltage held, RV04 gap 20 % > 2 %
+(cross catches), OCPP true, message counts unchanged. The energy-only run
+demonstrates the ∫-check weakness of a single-field forge (ratio 0.81).
 
-Ground truth comes **only** from the injection log written at collection time
-(`meta.json` per session: whether the spoof was enabled, the factor/target, and
-the CurrentDemand window). Detector/rule verdicts are never used as labels — that
-would let the model learn "copy the rule" and make the evaluation vacuous.
+## Scope comparison (ML, synthetic self-test)
+
+`analysis/extract_features.py` (log parsing) and `analysis/evaluate.py` (ISO-only
+/ OCPP-only / concat / cross + count-only ablation) reproduce the target
+signature on synthetic data with the coherent down-forge:
+
+```
+scope        model    F1     AUROC
+ISO-only     RF      0.54    0.69     ← near chance (blind in principle)
+OCPP-only    RF      0.34    0.55     ← near chance
+cross        RF      1.00    1.00     ← only correspondence separates it
+count-only   RF      0.00    0.50     ← no injection/count confound
+```
+
+```bash
+python3 Attack/A1/analysis/evaluate.py --self-test        # no testbed needed
+```
+
+## Live collection (on a machine with a built EVerest)
+
+```bash
+cd everest-core && git apply -p1 ../Attack/A1/patches/A1_iso-coherent-underreport.patch
+# build EVerest (produces build/dist), then:
+cd .. && A1_FACTOR=0.8 A1_TARGET=coherent ./Attack/A1/collect_a1.sh
+python3 Attack/A1/analysis/extract_features.py --sessions Attack/A1/Attack_data --out Attack/A1/analysis/features.csv
+python3 Attack/A1/analysis/evaluate.py --features Attack/A1/analysis/features.csv --by-factor
+```
+
+`collect_a1.sh` randomizes `dc_target_current` per session over an identical
+range for normal and attack (so the forged value stays inside the normal ISO
+marginal), and labels come only from the injection plan (`meta.json`), never
+from a detector.

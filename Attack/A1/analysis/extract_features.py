@@ -247,7 +247,7 @@ def self_test(tmp):
     for _ in range(30):
         mk(i, 0, 1.0); i += 1
     for _ in range(15):
-        mk(i, 1, 1.10); i += 1
+        mk(i, 1, 0.80); i += 1   # coherent under-report: ISO scaled by k<1, OCPP true
     return tmp
 
 

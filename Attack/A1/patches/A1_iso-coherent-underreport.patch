@@ -1,0 +1,106 @@
+diff --git a/modules/EVSE/EvseV2G/iso_server.cpp b/modules/EVSE/EvseV2G/iso_server.cpp
+index 41397f9..e13d0b6 100644
+--- a/modules/EVSE/EvseV2G/iso_server.cpp
++++ b/modules/EVSE/EvseV2G/iso_server.cpp
+@@ -2204,6 +2204,57 @@ static enum v2g_event handle_iso_pre_charge(struct v2g_connection* conn) {
+  * \param conn holds the structure with the V2G msg pair.
+  * \return Returns the next V2G-event.
+  */
++/*
++ * A1 coherent ISO under-report (cross-protocol boundary attack).
++ *
++ * A compromised charging station under-reports the metering values it sends to
++ * the EV over ISO 15118-2 (EVSEPresentCurrent and MeterInfo.MeterReading), while
++ * the power meter -- and therefore the OCPP MeterValues sent to the CSMS -- keep
++ * reporting the true values. The forgery is designed so that no SINGLE channel
++ * can flag it, only an ISO<->OCPP cross-check can:
++ *   - DOWN direction: present <= target reads as normal current derating, so the
++ *     ISO present-vs-target relation is not violated (present > target would be).
++ *   - COHERENT: present current and cumulative energy are scaled by the SAME
++ *     factor k (voltage held), so power = I*V and energy = integral(power) stay
++ *     internally consistent within ISO (the meter reading matches the integral
++ *     of the reported present power).
++ *   - IN-RANGE: k near 1 (default 0.8) keeps the forged value inside the normal
++ *     per-session distribution, so it is not a magnitude outlier.
++ * The result is invisible to ISO-only and to OCPP-only detection, and only the
++ * ISO<->OCPP value correspondence (rules RV04 for current, an energy-consistency
++ * rule for MeterReading) reveals it. No extra V2G messages are emitted, so
++ * message counts are unchanged (no injection/count confound).
++ *
++ * Runtime config (env, read once):
++ *   A1_ATTACK=1                      enable
++ *   A1_FACTOR=0.8                    scale factor k (<1 = under-report)
++ *   A1_TARGET=coherent|current|voltage|energy|current,energy   (default coherent
++ *                                    = current + energy, voltage held)
++ * Because EVerest does not republish these res values on its MQTT bus, the forged
++ * values are also emitted as "[A1-ATTACK] ISO ..." log lines for the collector.
++ */
++static void a1_read_cfg(int* enabled, double* k, int* do_c, int* do_v, int* do_e) {
++    static int inited = 0, en = 0, dc = 0, dv = 0, de = 0;
++    static double kk = 1.0;
++    if (!inited) {
++        inited = 1;
++        const char* e = getenv("A1_ATTACK");
++        en = (e != NULL) && (e[0] == '1' || e[0] == 't' || e[0] == 'T' || e[0] == 'y' || e[0] == 'Y');
++        const char* f = getenv("A1_FACTOR");
++        kk = (f != NULL) ? atof(f) : 1.0;
++        const char* t = getenv("A1_TARGET");
++        const char* tg = (t != NULL) ? t : "coherent";
++        if (strcmp(tg, "coherent") == 0) {
++            dc = 1; de = 1; /* current + energy, voltage held */
++        } else {
++            dc = (strstr(tg, "current") != NULL);
++            dv = (strstr(tg, "voltage") != NULL);
++            de = (strstr(tg, "energy") != NULL);
++        }
++    }
++    *enabled = en; *k = kk; *do_c = dc; *do_v = dv; *do_e = de;
++}
++
+ static enum v2g_event handle_iso_current_demand(struct v2g_connection* conn) {
+     struct iso2_CurrentDemandReqType* req = &conn->exi_in.iso2EXIDocument->V2G_Message.Body.CurrentDemandReq;
+     struct iso2_CurrentDemandResType* res = &conn->exi_out.iso2EXIDocument->V2G_Message.Body.CurrentDemandRes;
+@@ -2253,6 +2304,25 @@ static enum v2g_event handle_iso_current_demand(struct v2g_connection* conn) {
+     res->EVSEPowerLimitAchieved = conn->ctx->evse_v2g_data.evse_power_limit_achieved;
+     res->EVSEPresentCurrent = conn->ctx->evse_v2g_data.evse_present_current;
+     res->EVSEPresentVoltage = conn->ctx->evse_v2g_data.evse_present_voltage;
++    {
++        int a1_en, a1_c, a1_v, a1_e;
++        double a1_k;
++        a1_read_cfg(&a1_en, &a1_k, &a1_c, &a1_v, &a1_e);
++        if (a1_en && a1_k != 1.0) {
++            if (a1_c) {
++                long a1_nv = lround((double)res->EVSEPresentCurrent.Value * a1_k);
++                dlog(DLOG_LEVEL_INFO, "[A1-ATTACK] ISO present_current: %d -> %ld (k=%.4f, mult=%d)",
++                     (int)res->EVSEPresentCurrent.Value, a1_nv, a1_k, (int)res->EVSEPresentCurrent.Multiplier);
++                res->EVSEPresentCurrent.Value = (int)a1_nv;
++            }
++            if (a1_v) {
++                long a1_nv = lround((double)res->EVSEPresentVoltage.Value * a1_k);
++                dlog(DLOG_LEVEL_INFO, "[A1-ATTACK] ISO present_voltage: %d -> %ld (k=%.4f, mult=%d)",
++                     (int)res->EVSEPresentVoltage.Value, a1_nv, a1_k, (int)res->EVSEPresentVoltage.Multiplier);
++                res->EVSEPresentVoltage.Value = (int)a1_nv;
++            }
++        }
++    }
+     if ((conn->ctx->evse_v2g_data.evse_maximum_voltage_limit_is_used == 1) &&
+         (calc_physical_value(req->EVTargetVoltage.Value, req->EVTargetVoltage.Multiplier) >=
+          calc_physical_value(conn->ctx->evse_v2g_data.evse_maximum_voltage_limit.Value,
+@@ -2266,6 +2336,17 @@ static enum v2g_event handle_iso_current_demand(struct v2g_connection* conn) {
+         res->MeterInfo.MeterID.charactersLen = conn->ctx->meter_info.meter_id.bytesLen;
+         memcpy(res->MeterInfo.MeterID.characters, conn->ctx->meter_info.meter_id.bytes, iso2_MeterID_CHARACTER_SIZE);
+         res->MeterInfo.MeterReading = conn->ctx->meter_info.meter_reading;
++        {
++            int a1_en, a1_c, a1_v, a1_e;
++            double a1_k;
++            a1_read_cfg(&a1_en, &a1_k, &a1_c, &a1_v, &a1_e);
++            if (a1_en && a1_e && a1_k != 1.0) {
++                unsigned long long a1_orig = (unsigned long long)res->MeterInfo.MeterReading;
++                unsigned long long a1_nv = (unsigned long long)llround((double)a1_orig * a1_k);
++                dlog(DLOG_LEVEL_INFO, "[A1-ATTACK] ISO meter_reading: %llu -> %llu (k=%.4f)", a1_orig, a1_nv, a1_k);
++                res->MeterInfo.MeterReading = (uint64_t)a1_nv;
++            }
++        }
+         res->MeterInfo.MeterReading_isUsed = 1;
+         res->MeterInfo_isUsed = 1;
+         // Reset the signal for the next time handle_set_MeterInfo is signaled

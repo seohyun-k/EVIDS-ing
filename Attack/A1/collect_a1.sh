@@ -4,20 +4,20 @@
 # Runs a plan of normal + attack charging sessions in the EVerest SIL testbed
 # (config-sil-dc-ocpp201) and writes, per session, the raw ISO/OCPP/powermeter
 # streams plus a ground-truth injection log (meta.json). The attack is the
-# in-band present-value spoof from patches/A1_present-value-spoofing.patch and is
+# coherent ISO under-report from patches/A1_iso-coherent-underreport.patch and is
 # toggled per session purely by exporting env vars (no rebuild between
 # intensities). Labels come from the injection plan, never from a detector.
 #
 # Usage:
 #   ./Attack/A1/collect_a1.sh                    # defaults below
-#   N_NORMAL=40 N_ATTACK=20 FACTORS="1.05 1.10 1.20" A1_TARGET=present_current \
+#   N_NORMAL=40 N_ATTACK=20 FACTORS="0.75 0.80 0.90" A1_TARGET=coherent \
 #       ./Attack/A1/collect_a1.sh
 #
 # Env knobs:
 #   N_NORMAL   normal sessions to collect               (default 20)
 #   N_ATTACK   attack sessions PER factor               (default 20)
-#   FACTORS    space-separated intensity sweep          (default "1.10")
-#   A1_TARGET  present_current|present_voltage|both      (default present_current)
+#   FACTORS    scale factors k (<1 = under-report)      (default "0.80")
+#   A1_TARGET  coherent|current|voltage|energy           (default coherent)
 #   A1_DIST    EVerest build/dist prefix (auto-detected if unset)
 #   CSMS       path to csms_ocpp201.py (auto-detected if unset)
 #   CFG        base EVerest config name                  (default config-sil-dc-ocpp201)
@@ -37,8 +37,8 @@ set -u
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 N_NORMAL="${N_NORMAL:-20}"
 N_ATTACK="${N_ATTACK:-20}"
-FACTORS="${FACTORS:-1.10}"
-A1_TARGET="${A1_TARGET:-present_current}"
+FACTORS="${FACTORS:-0.80}"
+A1_TARGET="${A1_TARGET:-coherent}"
 CFG="${CFG:-config-sil-dc-ocpp201}"
 OUTROOT="${OUTROOT:-$REPO_ROOT/Attack/A1/Attack_data}"
 SESSION_TIMEOUT="${SESSION_TIMEOUT:-260}"
