@@ -1,1 +1,6 @@
 everest-core/build/
+
+# A1 generated artifacts
+Attack/A1/analysis/_selftest_sessions/
+Attack/A1/analysis/*.csv
+Attack/A1/Attack_data/run_*/
