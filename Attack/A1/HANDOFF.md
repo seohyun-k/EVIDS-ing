@@ -58,6 +58,53 @@ EVerest SIL 공급기는 이상적 pass-through라 기본 정상 데이터는 �
 6. 실측 파서 확인: 실제 로그 스키마에 맞게 `extract_features.py` 상단 CONTRACT(iso/ocpp/powermeter 파싱 키) 조정 필요할 수 있음.
 7. 기대 결과: ISO단독/OCPP단독 near-chance, cross 높음, count-only chance. 나오면 원고 §II(SMDEVC)·§III-D·§IV-B·Discussion 재작성.
 
+## 7b. 실제 빌드 성공 레시피 (Ubuntu 24.04, sudo 없이, /home/seohyunk) — 검증됨
+```bash
+# 0) micromamba (홈에)
+curl -sL https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-linux-64 -o ~/bin/micromamba && chmod +x ~/bin/micromamba
+export PATH=~/bin:$PATH; export MAMBA_ROOT_PREFIX=~/micromamba
+eval "$(~/bin/micromamba shell hook -s bash)"
+# 1) 의존성 env (libpcap·libevent 포함 — 각각 EvseV2G/PacketSniffer가 요구)
+micromamba create -y -n everest -c conda-forge \
+  python=3.11 pip cxx-compiler c-compiler cmake ninja make pkg-config \
+  boost-cpp openssl sqlite libcurl libcap nodejs mosquitto rsync git libpcap libevent
+micromamba activate everest
+# 2) edm (ev-cli는 빌드가 venv에 자동 설치하므로 수동설치 불필요)
+python -m pip install "git+https://github.com/EVerest/everest-dev-environment.git#subdirectory=dependency_manager"
+# 3) 코드 + A1 패치 (git apply가 "Skipped"로 조용히 실패 → classic patch 도구 사용)
+cd ~ && git clone https://github.com/seohyun-k/EVIDS-ing.git
+cd EVIDS-ing && git checkout A1_attack && git pull
+cd everest-core && patch -p1 < ../Attack/A1/patches/A1_iso-coherent-underreport.patch
+grep -c "A1-ATTACK" modules/EVSE/EvseV2G/iso_server.cpp   # 4 = 적용됨(주석1+dlog3)
+# 4) configure (불필요 모듈 sd-bus 제외 + cmake4 정책우회)
+cmake -S . -B build -G Ninja \
+  -DCMAKE_INSTALL_PREFIX="$PWD/build/dist" -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DBUILD_TESTING=OFF -Deverest-core_USE_PYTHON_VENV=ON \
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  -DEVEREST_EXCLUDE_MODULES="Linux_Systemd_Rauc" -DEVEREST_DEPENDENCY_ENABLED_SDBUS_CPP=OFF
+# 5) build
+ninja -C build install     # -> build/dist/bin/manager
+```
+막혔던 것들과 해결: sdbus-cpp(RAUC 모듈, SIL 불필요) → 제외 + `EVEREST_DEPENDENCY_ENABLED_SDBUS_CPP=OFF`; libpcap(PacketSniffer)·libevent(EvseV2G) → conda 설치. Doxygen/ZLIB/cJSON/radvd "not found"은 경고(무시).
+
+## 7c. 수집 실행
+```bash
+micromamba activate everest
+cd ~/EVIDS-ing
+# 먼저 1세션 스모크로 파이프라인 확인 (ev0 인터페이스 생성이 sudo 없이 되는지 등)
+N_NORMAL=1 N_ATTACK=1 NORMAL_DERATE_FRAC=1 A1_FACTOR=0.8 A1_TARGET=coherent \
+  ./Attack/A1/collect_a1.sh
+# 세션 폴더에 mqtt.log/csms.log/manager.log/meta.json 생기고, 공격 세션 manager.log에
+# "[A1-ATTACK] ISO ..." 라인이 보이면 정상. 그다음 본수집:
+N_NORMAL=60 N_ATTACK=30 FACTORS="0.75 0.80 0.90" NORMAL_DERATE_FRAC=0.5 \
+  ./Attack/A1/collect_a1.sh
+python3 Attack/A1/analysis/extract_features.py --sessions Attack/A1/Attack_data --out Attack/A1/analysis/features.csv
+python3 Attack/A1/analysis/evaluate.py --features Attack/A1/analysis/features.csv --by-factor
+```
+분석엔 python 패키지 필요: `python -m pip install scikit-learn numpy` (xgboost는 선택).
+**주의(ev0):** collect 스크립트가 `ip link add ev0 type dummy`로 더미 인터페이스를 만드는데 이게 CAP_NET_ADMIN(보통 sudo)을 요구할 수 있음. 스모크에서 세션이 안 서면 이 지점 의심 → 관리자에게 ev0 1회 생성 요청하거나 대체 구성 필요.
+**주의(파서):** 실제 로그 스키마가 `extract_features.py` 상단 CONTRACT의 파싱 키와 다르면 조정 필요 — 스모크 로그(mqtt.log/csms.log) 샘플을 보고 iso/ocpp/powermeter 값 위치를 맞출 것.
+
 ## 8. 열린 이슈 / 주의
 - 실기 관측점: EVerest는 res 값을 버스에 publish 안 함 → 패치가 `[A1-ATTACK]` 로그로 방출, collector가 파싱. 실기에선 ISO 평문 탭.
 - 완전 airtight를 원하면 present 전류·전압·에너지를 같은 k로 함께(스케일) — 현재는 전류+에너지(전압 유지)로 충분(∫검산 통과).
