@@ -4,6 +4,15 @@
 다른 컴퓨터/새 Claude Code 세션/팀원이 이걸 읽고 그대로 이어갈 수 있게 정리했습니다.
 (새 Claude Code 세션에서 자동 로드되게 하려면 이 파일을 저장소 루트에 `CLAUDE.md`로 복사해도 됩니다.)
 
+## 0. 환경 제약 (필독 — 위반 금지)
+공유 연구실 서버(Ubuntu 24.04)에서 작업한다. 아래는 절대 규칙이다:
+- **`sudo` 절대 사용 금지.** 어떤 명령도 sudo로 실행하지 않는다.
+- **시스템/전역에 설치·삭제·수정 금지.** `apt`, `/usr`, `/etc`, `/opt` 등 시스템 경로를 건드리지 않는다.
+- **모든 것은 `/home/seohyunk` 안에서만.** 툴체인·라이브러리는 micromamba conda env `everest`에만 설치한다: `micromamba install -n everest -c conda-forge <pkg>`. pip/npm도 홈 prefix로만.
+- **막힌 의존성은 conda로 해결하거나 해당 모듈을 빌드에서 제외**한다(예: sd-bus는 conda에 없어 RAUC 모듈 제외로 우회했음). conda에 없다고 sudo/apt로 설치하지 말 것.
+- **`sudo`가 필요한 상황(예: `ip link add ev0`가 CAP_NET_ADMIN 요구)** 이 나오면 임의로 실행하지 말고 **사용자에게 보고**하고 지시를 기다린다.
+- GPU는 이 작업에 쓰지 않는다(EVerest·sklearn 모두 CPU). GPU 설정 불필요.
+
 ## 1. 논문·문제
 - 논문: "Cross-Protocol Observation for Intrusion Detection in EV Charging (ISO 15118 + OCPP 2.0.1)", EVerest SIL 테스트베드.
 - 핵심 주장: **단일 채널로는 원리적으로 못 잡고 교차 관측이 필요한 공격이 실재한다.**
