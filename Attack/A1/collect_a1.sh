@@ -25,6 +25,9 @@
 #   SESSION_TIMEOUT  hard per-session cap in seconds     (default 260)
 #   VARY_SETPOINT  1=randomize dc_target_current/voltage per session (default 1)
 #   SETPOINT_MIN/MAX  DC target current range in A       (default 10 / 32)
+#   NORMAL_DERATE_FRAC  share of NORMAL sessions that legitimately derate
+#                       (present<target, label 0)         (default 0.5)
+#   DERATE_MIN/MAX  supply cap as fraction of target      (default 0.55 / 0.90)
 #
 # WHY VARY_SETPOINT MATTERS (do not disable without reason): the forged ISO value
 # must land INSIDE the normal ISO current marginal, otherwise an ISO-only detector
@@ -45,6 +48,14 @@ SESSION_TIMEOUT="${SESSION_TIMEOUT:-260}"
 VARY_SETPOINT="${VARY_SETPOINT:-1}"
 SETPOINT_MIN="${SETPOINT_MIN:-10}"
 SETPOINT_MAX="${SETPOINT_MAX:-32}"
+# Legitimate derating in NORMAL data (essential for validity): a fraction of
+# normal sessions cap the DC supply below the EV target so the charger delivers
+# LESS than requested (present < target) — a normal condition — and OCPP meters
+# that true lower value (ISO = OCPP). Without this, an ISO-only model separates
+# the attack's present<target as an artifact and the existence proof is void.
+NORMAL_DERATE_FRAC="${NORMAL_DERATE_FRAC:-0.5}"   # share of normal sessions that derate
+DERATE_MIN="${DERATE_MIN:-0.55}"                  # supply cap as fraction of target current
+DERATE_MAX="${DERATE_MAX:-0.90}"
 
 # ---- locate build/dist and csms ----
 autodetect() { for c in "$@"; do [ -e "$c" ] && { echo "$c"; return 0; }; done; return 1; }
@@ -67,7 +78,7 @@ RUN_ID="run_$(date '+%Y%m%d_%H%M%S')"
 RUNDIR="$OUTROOT/$RUN_ID"
 mkdir -p "$RUNDIR"
 echo "[collect] run=$RUN_ID dist=$A1_DIST csms=$CSMS cfg=$CFG"
-echo "[collect] plan: normal=$N_NORMAL, attack/factor=$N_ATTACK, factors=[$FACTORS], target=$A1_TARGET"
+echo "[collect] plan: normal=$N_NORMAL (derate frac=$NORMAL_DERATE_FRAC), attack/factor=$N_ATTACK, factors=[$FACTORS], target=$A1_TARGET"
 
 # ---- broker (kept up across sessions) ----
 BROKER_CONF=/tmp/a1_mosquitto.conf
@@ -93,10 +104,12 @@ BASE_CFG_FILE="$(autodetect \
   "$REPO_ROOT/everest-core/config/$CFG.yaml")"
 ETC_EVEREST="$A1_DIST/etc/everest"
 
-# make_session_config <sid> <target_current> <target_voltage> -> echoes config NAME
-# Writes $ETC_EVEREST/<name>.yaml with dc_target_current/voltage overridden.
+# make_session_config <sid> <target_current> <target_voltage> [supply_cap] -> echoes config NAME
+# Overrides dc_target_current/voltage; if supply_cap is given, also caps the DC
+# supply's max_current (config_implementation.main.max_current on powersupply_dc)
+# so the charger legitimately delivers less than the EV target (derating).
 make_session_config() {
-  local sid="$1" cur="$2" volt="$3"
+  local sid="$1" cur="$2" volt="$3" cap="${4:-}"
   if [ "$VARY_SETPOINT" != "1" ] || [ -z "${BASE_CFG_FILE:-}" ] || [ ! -w "$ETC_EVEREST" ]; then
     [ "$VARY_SETPOINT" = "1" ] && [ -z "${_warned_setpoint:-}" ] && {
       echo "[collect] WARN: VARY_SETPOINT=1 but base config or $ETC_EVEREST not writable;" >&2
@@ -106,7 +119,14 @@ make_session_config() {
   fi
   local name="config-a1-$sid"
   sed -E "s/^([[:space:]]*dc_target_current:).*/\1 $cur/; s/^([[:space:]]*dc_target_voltage:).*/\1 $volt/" \
-      "$BASE_CFG_FILE" > "$ETC_EVEREST/$name.yaml"
+      "$BASE_CFG_FILE" \
+  | awk -v cap="$cap" '
+      { print }
+      /^[[:space:]]*module:[[:space:]]*DCSupplySimulator[[:space:]]*$/ && cap != "" {
+        print "    config_implementation:"
+        print "      main:"
+        print "        max_current: " cap
+      }' > "$ETC_EVEREST/$name.yaml"
   echo "$name"
 }
 rand_range() { python3 -c "import random,sys;print(round(random.uniform(float(sys.argv[1]),float(sys.argv[2])),1))" "$1" "$2"; }
@@ -119,9 +139,11 @@ kill_session() {
 }
 trap 'echo "[collect] teardown"; kill_session; pkill -x mosquitto 2>/dev/null' EXIT
 
-# run_one <sessdir> <attack 0|1> <factor>
+# run_one <sessdir> <attack 0|1> <factor> [derate_frac]
+# derate_frac (normal sessions only): if set, cap DC supply to derate_frac*target
+# so present < target legitimately (label stays 0 = normal).
 run_one() {
-  local sdir="$1" attack="$2" factor="$3"
+  local sdir="$1" attack="$2" factor="$3" derate_frac="${4:-}"
   mkdir -p "$sdir"
   local MQTT="$sdir/mqtt.log" MGR="$sdir/manager.log" CS="$sdir/csms.log"
   : > "$MQTT"; : > "$MGR"; : > "$CS"
@@ -135,7 +157,13 @@ run_one() {
     tgt_cur=$(rand_range "$SETPOINT_MIN" "$SETPOINT_MAX")
     tgt_volt=400
   fi
-  sess_cfg=$(make_session_config "$(basename "$sdir")" "$tgt_cur" "$tgt_volt")
+  # legitimate derating (normal sessions only): cap supply below target
+  local supply_cap="" derate=0
+  if [ -n "$derate_frac" ]; then
+    supply_cap=$(python3 -c "import sys;print(round(float(sys.argv[1])*float(sys.argv[2]),1))" "$tgt_cur" "$derate_frac")
+    derate=1
+  fi
+  sess_cfg=$(make_session_config "$(basename "$sdir")" "$tgt_cur" "$tgt_volt" "$supply_cap")
 
   local start_epoch; start_epoch=$(date +%s)
   # ground-truth injection log — the ONLY source of labels
@@ -149,6 +177,8 @@ run_one() {
   "config": "$sess_cfg",
   "dc_target_current": $tgt_cur,
   "dc_target_voltage": $tgt_volt,
+  "derate_normal": $derate,
+  "supply_max_current": $( [ -n "$supply_cap" ] && echo "$supply_cap" || echo "null" ),
   "start_epoch": $start_epoch,
   "note": "label from injection plan, not from any detector"
 }
@@ -200,10 +230,18 @@ PY
 }
 
 idx=0
-# normal sessions
+# normal sessions — a NORMAL_DERATE_FRAC share of them derate (present<target,
+# label still 0) so the attack's present<target is not separable single-channel.
 for i in $(seq 1 "$N_NORMAL"); do
-  printf -v sid "session_%04d_normal" "$idx"
-  run_one "$RUNDIR/$sid" 0 1.0
+  roll=$(python3 -c "import random;print(1 if random.random() < $NORMAL_DERATE_FRAC else 0)")
+  if [ "$roll" = "1" ]; then
+    frac=$(rand_range "$DERATE_MIN" "$DERATE_MAX")
+    printf -v sid "session_%04d_normal_derate" "$idx"
+    run_one "$RUNDIR/$sid" 0 1.0 "$frac"
+  else
+    printf -v sid "session_%04d_normal" "$idx"
+    run_one "$RUNDIR/$sid" 0 1.0
+  fi
   idx=$((idx+1))
 done
 # attack sessions per factor

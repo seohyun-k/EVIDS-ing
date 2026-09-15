@@ -116,3 +116,19 @@ python3 Attack/A1/analysis/evaluate.py --features Attack/A1/analysis/features.cs
 range for normal and attack (so the forged value stays inside the normal ISO
 marginal), and labels come only from the injection plan (`meta.json`), never
 from a detector.
+
+### Legitimate derating in the normal set (validity-critical)
+
+EVerest's DC supply is an ideal pass-through, so a plain normal run always has
+`present == target`. Then an ISO-only model would separate the attack's
+`present < target` as a novelty (dataset artifact) and the existence proof would
+be void. So `collect_a1.sh` makes a fraction (`NORMAL_DERATE_FRAC`, default 0.5)
+of **normal** sessions legitimately derate by capping the DC supply below the EV
+target (`config_implementation.main.max_current` on `powersupply_dc`, set to
+`DERATE_MIN..DERATE_MAX × target`). In those sessions the charger really delivers
+less, so OCPP meters the same lower value (ISO = OCPP) — a normal derating
+session is then **indistinguishable from an attack session on the ISO channel
+alone**, and only ISO↔OCPP disagreement separates them. (EVerest ships
+`config-sil-ac-temp-derating.yaml`, confirming derating is normal charger
+behavior.) `EVSECurrentLimitAchieved` in ISO 15118-2 exists precisely for this
+`present ≤ target` condition.
