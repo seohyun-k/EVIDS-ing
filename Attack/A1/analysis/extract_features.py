@@ -35,8 +35,13 @@ ISO_VOLT_KEYS = ("EVSEPresentVoltage", "evse_present_voltage", "present_voltage"
 OCPP_MEASURANDS = {"current": ("Current.Import", "Current"), "voltage": ("Voltage",)}
 
 NUM = r"-?\d+(?:\.\d+)?"
-SPOOF_RE = re.compile(r"\[A1-ATTACK\] ISO (present_current|present_voltage) spoof: "
-                      rf"({NUM}) -> ({NUM})")
+# Matches the actual SECC spoof log line, e.g.
+#   [A1-ATTACK] ISO present_current: 170 -> 136 (k=0.8000, mult=-1)
+# groups: (field, real_before, emitted_after, multiplier?). The emitted value is
+# what the EV receives; multiplier (ISO 15118 PhysicalValue) scales it to amps so
+# it is comparable to the OCPP MeterValues (already in amps).
+SPOOF_RE = re.compile(r"\[A1-ATTACK\] ISO (present_current|present_voltage): "
+                      rf"({NUM}) -> ({NUM})(?:[^)]*?mult=(-?\d+))?")
 
 
 def _stats(xs):
@@ -70,11 +75,20 @@ def _find_numbers_for_keys(text, keys):
     return vals
 
 
+def _emitted(after, mult):
+    """Emitted ISO value scaled to amps/volts: after * 10^mult (mult optional)."""
+    return float(after) * (10 ** int(mult)) if mult not in (None, "") else float(after)
+
+
 def parse_iso(mqtt_text, manager_text):
-    cur = [f for (w, _b, a) in (m.groups() for m in SPOOF_RE.finditer(manager_text))
-           if w == "present_current" for f in [float(a)]]
-    volt = [float(a) for (w, _b, a) in (m.groups() for m in SPOOF_RE.finditer(manager_text))
-            if w == "present_voltage"]
+    # Prefer the SPOOFED value the EV actually receives (the '-> Y' emitted value),
+    # scaled by the ISO 15118 multiplier so it is comparable to OCPP amps. On normal
+    # sessions there are no A1-ATTACK lines, so we fall back to the (truthful)
+    # EVSEPresentCurrent published on the iso15118 topic.
+    cur = [_emitted(a, mult) for (w, _b, a, mult)
+           in (m.groups() for m in SPOOF_RE.finditer(manager_text)) if w == "present_current"]
+    volt = [_emitted(a, mult) for (w, _b, a, mult)
+            in (m.groups() for m in SPOOF_RE.finditer(manager_text)) if w == "present_voltage"]
     if not cur:
         cur = _find_numbers_for_keys(mqtt_text, ISO_CUR_KEYS)
     if not volt:

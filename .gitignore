@@ -4,3 +4,7 @@ everest-core/build/
 Attack/A1/analysis/_selftest_sessions/
 Attack/A1/analysis/*.csv
 Attack/A1/Attack_data/run_*/
+
+# macOS
+.DS_Store
+**/.DS_Store
