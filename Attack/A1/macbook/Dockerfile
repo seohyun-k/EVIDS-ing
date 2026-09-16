@@ -28,7 +28,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # else (compilers, cmake, boost, openssl, mosquitto, ...) comes from conda-forge
 # so this matches the sudo-free host recipe exactly.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates bzip2 git patch iproute2 procps && \
+      curl ca-certificates bzip2 git patch iproute2 procps binutils && \
     rm -rf /var/lib/apt/lists/*
 
 # micromamba, arch-aware (arm64 -> aarch64, amd64 -> 64)
@@ -65,16 +65,44 @@ RUN micromamba run -n everest cmake -S . -B build -G Ninja \
       -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
       -DEVEREST_EXCLUDE_MODULES="Linux_Systemd_Rauc" \
       -DEVEREST_DEPENDENCY_ENABLED_SDBUS_CPP=OFF && \
-    micromamba run -n everest ninja -C build install
+    micromamba run -n everest ninja -j2 -C build install
 
 # josev runtime deps (pydantic==1.*, environs, cryptography, ...) are NOT pulled
 # by the build; PyEvJosev crashes at import without them. Install into BOTH the
 # build venv AND the conda env (the manager's fallback interpreter), plus the
 # analysis deps.
-RUN $ENVBIN/python -m pip install --no-cache-dir -r build/_deps/josev-src/requirements.txt && \
-    ./build/venv/bin/python -m pip install --no-cache-dir -r build/_deps/josev-src/requirements.txt && \
-    $ENVBIN/python -m pip install --no-cache-dir scikit-learn numpy && \
-    $ENVBIN/python -c "import pydantic; assert pydantic.VERSION.startswith('1.'), pydantic.VERSION"
+# Runtime system deps, installed post-compile to preserve the build cache:
+#  - tzdata: EVerest's date lib needs an IANA zoneinfo dir or core modules
+#    (api/evse_manager/evse_security) abort with "discover_tz_dir failed ...".
+#  - default-jre-headless: josev's ISO 15118 EXI codec (exificient) shells out
+#    to `java`; iso15118_car crashes without it (also provides keytool).
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
+    apt-get install -y --no-install-recommends tzdata default-jre-headless && \
+    rm -rf /var/lib/apt/lists/*
+RUN micromamba run -n everest $ENVBIN/python -m pip install --no-cache-dir -r build/_deps/josev-src/requirements.txt && \
+    micromamba run -n everest ./build/venv/bin/python -m pip install --no-cache-dir -r build/_deps/josev-src/requirements.txt && \
+    micromamba run -n everest $ENVBIN/python -m pip install --no-cache-dir scikit-learn numpy websockets ocpp && \
+    micromamba run -n everest $ENVBIN/python -c "import pydantic; assert pydantic.VERSION.startswith('1.'), pydantic.VERSION"
+
+# EV-IDS canonical collection parameters (team Notion "핵심 파라미터" §7), applied
+# to the installed dist post-compile so the heavy build layer stays cached:
+#   - charge 180s (iso_wait_for_stop) + auto_exec_infinite: true  -> ev_manager_1
+#   - OCPP201 MeterValues intervals 10s (TxUpdatedInterval 120->10,
+#     AlignedDataCtrlr.Interval 900->10) so each session yields ~40 MeterValues.
+# The device_model DB is built fresh from these JSONs at runtime (no stale DB in
+# the image / --rm containers), so editing the JSON is sufficient. device: auto
+# stays as-is; collect_a1.sh rewrites it to ev0 per session.
+RUN set -eux; D="$PWD/build/dist"; \
+    for CFG in "$D/etc/everest/config-sil-dc-ocpp201.yaml" "$PWD/config/config-sil-dc-ocpp201.yaml"; do \
+      [ -f "$CFG" ] || continue; \
+      sed -i 's/iso_wait_for_stop 60/iso_wait_for_stop 180/' "$CFG"; \
+      grep -q 'auto_exec_infinite' "$CFG" || sed -i '/auto_exec: true/a\      auto_exec_infinite: true' "$CFG"; \
+    done; \
+    STD="$D/share/everest/modules/OCPP201/component_config/standardized"; \
+    micromamba run -n everest python -c 'import json,sys; s=sys.argv[1]; \
+p=s+"/SampledDataCtrlr.json"; d=json.load(open(p)); n1=[a.update(value=10) for v in d["properties"].values() if isinstance(v,dict) and v.get("variable_name")=="TxUpdatedInterval" for a in v.get("attributes",[]) if a.get("type")=="Actual"]; json.dump(d,open(p,"w"),indent=2); \
+q=s+"/AlignedDataCtrlr.json"; e=json.load(open(q)); n2=[a.update(value=10) for v in e["properties"].values() if isinstance(v,dict) and v.get("variable_name")=="Interval" for a in v.get("attributes",[]) if a.get("type")=="Actual"]; json.dump(e,open(q,"w"),indent=2); \
+assert len(n1)==1 and len(n2)==1, ("interval edit missed", len(n1), len(n2)); print("OCPP MeterValues intervals -> 10s")' "$STD"
 
 WORKDIR /opt/EVIDS-ing
 COPY docker-entrypoint.sh /usr/local/bin/a1-entrypoint
