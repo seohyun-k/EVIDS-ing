@@ -1,0 +1,72 @@
+
+=== A1 scope comparison (all sessions)  (n=177, pos=90, neg=87) ===
+scope       model     Prec  Recall     F1  AUROC  #feat
+ISO-only    LogReg   0.581   0.574  0.577  0.611  12
+ISO-only    RF       0.600   0.644  0.621  0.624  12
+ISO-only    XGB      0.569   0.622  0.594  0.579  12
+OCPP-only   LogReg   0.617   0.681  0.648  0.648  12
+OCPP-only   RF       0.599   0.637  0.617  0.629  12
+OCPP-only   XGB      0.613   0.622  0.618  0.620  12
+concat      LogReg   0.611   0.681  0.644  0.642  24
+concat      RF       0.589   0.600  0.595  0.609  24
+concat      XGB      0.576   0.611  0.593  0.583  24
+cross       LogReg   0.594   0.678  0.633  0.640  32
+cross       RF       0.584   0.604  0.594  0.599  32
+cross       XGB      0.582   0.615  0.598  0.582  32
+count-only  LogReg   0.531   0.648  0.583  0.507  5
+count-only  RF       0.565   0.944  0.707  0.552  5
+count-only  XGB      0.562   0.944  0.704  0.560  5
+
+=== A1 scope comparison (normal + attack@factor=0.75)  (n=117, pos=30, neg=87) ===
+scope       model     Prec  Recall     F1  AUROC  #feat
+ISO-only    LogReg   0.361   0.633  0.460  0.635  12
+ISO-only    RF       0.371   0.522  0.434  0.624  12
+ISO-only    XGB      0.402   0.422  0.409  0.571  12
+OCPP-only   LogReg   0.370   0.633  0.467  0.659  12
+OCPP-only   RF       0.302   0.367  0.330  0.531  12
+OCPP-only   XGB      0.334   0.289  0.309  0.517  12
+concat      LogReg   0.373   0.633  0.469  0.653  24
+concat      RF       0.343   0.433  0.383  0.589  24
+concat      XGB      0.342   0.322  0.331  0.539  24
+cross       LogReg   0.395   0.644  0.489  0.681  32
+cross       RF       0.335   0.411  0.369  0.591  32
+cross       XGB      0.310   0.278  0.291  0.540  32
+count-only  LogReg   0.216   0.522  0.305  0.397  5
+count-only  RF       0.242   0.611  0.346  0.440  5
+count-only  XGB      0.000   0.000  0.000  0.458  5
+
+=== A1 scope comparison (normal + attack@factor=0.8)  (n=117, pos=30, neg=87) ===
+scope       model     Prec  Recall     F1  AUROC  #feat
+ISO-only    LogReg   0.326   0.611  0.425  0.624  12
+ISO-only    RF       0.356   0.522  0.423  0.609  12
+ISO-only    XGB      0.360   0.300  0.327  0.589  12
+OCPP-only   LogReg   0.372   0.678  0.480  0.665  12
+OCPP-only   RF       0.337   0.456  0.386  0.595  12
+OCPP-only   XGB      0.376   0.300  0.334  0.581  12
+concat      LogReg   0.374   0.689  0.484  0.652  24
+concat      RF       0.333   0.444  0.380  0.594  24
+concat      XGB      0.392   0.333  0.360  0.586  24
+cross       LogReg   0.335   0.589  0.427  0.614  32
+cross       RF       0.366   0.500  0.422  0.593  32
+cross       XGB      0.396   0.356  0.374  0.591  32
+count-only  LogReg   0.302   0.722  0.426  0.546  5
+count-only  RF       0.280   0.789  0.413  0.515  5
+count-only  XGB      0.151   0.033  0.055  0.528  5
+
+=== A1 scope comparison (normal + attack@factor=0.9)  (n=117, pos=30, neg=87) ===
+scope       model     Prec  Recall     F1  AUROC  #feat
+ISO-only    LogReg   0.263   0.489  0.341  0.519  12
+ISO-only    RF       0.307   0.389  0.343  0.567  12
+ISO-only    XGB      0.256   0.244  0.250  0.504  12
+OCPP-only   LogReg   0.288   0.656  0.400  0.573  12
+OCPP-only   RF       0.265   0.367  0.307  0.508  12
+OCPP-only   XGB      0.302   0.244  0.270  0.500  12
+concat      LogReg   0.290   0.622  0.396  0.554  24
+concat      RF       0.252   0.311  0.278  0.522  24
+concat      XGB      0.251   0.222  0.236  0.477  24
+cross       LogReg   0.289   0.622  0.395  0.550  32
+cross       RF       0.235   0.289  0.259  0.523  32
+cross       XGB      0.257   0.222  0.238  0.519  32
+count-only  LogReg   0.258   0.589  0.358  0.495  5
+count-only  RF       0.314   0.933  0.469  0.588  5
+count-only  XGB      0.067   0.011  0.019  0.582  5
