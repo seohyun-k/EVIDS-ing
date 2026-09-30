@@ -52,6 +52,9 @@ RUN $ENVBIN/python -m pip install --no-cache-dir \
 # patch is applied to pristine upstream (iso_server.cpp is NOT committed patched).
 ARG REPO=https://github.com/seohyun-k/EVIDS-ing.git
 ARG BRANCH=A1_attack
+# Bump CACHEBUST (e.g. --build-arg CACHEBUST=$(date +%s)) to force a fresh clone
+# after pushing new commits; keeps the apt/conda layers above cached.
+ARG CACHEBUST=0
 RUN git clone --depth 1 --branch "$BRANCH" "$REPO" /opt/EVIDS-ing
 WORKDIR /opt/EVIDS-ing/everest-core
 RUN patch -p1 < ../Attack/A1/patches/A1_iso-coherent-underreport.patch && \

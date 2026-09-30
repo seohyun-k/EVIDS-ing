@@ -20,7 +20,7 @@ docker info >/dev/null 2>&1 || { echo "docker daemon not running — start Docke
 
 echo "== [1/2] building '$IMAGE' =="
 echo "   (this compiles everest-core; first build is tens of minutes, then cached)"
-docker build "${PLATFORM_ARGS[@]}" -t "$IMAGE" "$HERE"
+docker build "${PLATFORM_ARGS[@]}" --build-arg CACHEBUST="${CACHEBUST:-0}" -t "$IMAGE" "$HERE"
 
 OUT="$HERE/../Attack_data"
 mkdir -p "$OUT"
