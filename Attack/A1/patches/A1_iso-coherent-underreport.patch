@@ -1,5 +1,5 @@
 diff --git a/modules/EVSE/EvseV2G/iso_server.cpp b/modules/EVSE/EvseV2G/iso_server.cpp
-index 41397f9..e13d0b6 100644
+index 41397f9..3683159 100644
 --- a/modules/EVSE/EvseV2G/iso_server.cpp
 +++ b/modules/EVSE/EvseV2G/iso_server.cpp
 @@ -2204,6 +2204,57 @@ static enum v2g_event handle_iso_pre_charge(struct v2g_connection* conn) {
@@ -60,7 +60,7 @@ index 41397f9..e13d0b6 100644
  static enum v2g_event handle_iso_current_demand(struct v2g_connection* conn) {
      struct iso2_CurrentDemandReqType* req = &conn->exi_in.iso2EXIDocument->V2G_Message.Body.CurrentDemandReq;
      struct iso2_CurrentDemandResType* res = &conn->exi_out.iso2EXIDocument->V2G_Message.Body.CurrentDemandRes;
-@@ -2253,6 +2304,25 @@ static enum v2g_event handle_iso_current_demand(struct v2g_connection* conn) {
+@@ -2253,6 +2304,33 @@ static enum v2g_event handle_iso_current_demand(struct v2g_connection* conn) {
      res->EVSEPowerLimitAchieved = conn->ctx->evse_v2g_data.evse_power_limit_achieved;
      res->EVSEPresentCurrent = conn->ctx->evse_v2g_data.evse_present_current;
      res->EVSEPresentVoltage = conn->ctx->evse_v2g_data.evse_present_voltage;
@@ -71,6 +71,8 @@ index 41397f9..e13d0b6 100644
 +        if (a1_en && a1_k != 1.0) {
 +            if (a1_c) {
 +                long a1_nv = lround((double)res->EVSEPresentCurrent.Value * a1_k);
++                // DOWN-only: never report more than actually delivered (present <= real <= target)
++                if (a1_nv > (long)res->EVSEPresentCurrent.Value) a1_nv = (long)res->EVSEPresentCurrent.Value;
 +                dlog(DLOG_LEVEL_INFO, "[A1-ATTACK] ISO present_current: %d -> %ld (k=%.4f, mult=%d)",
 +                     (int)res->EVSEPresentCurrent.Value, a1_nv, a1_k, (int)res->EVSEPresentCurrent.Multiplier);
 +                res->EVSEPresentCurrent.Value = (int)a1_nv;
@@ -83,10 +85,16 @@ index 41397f9..e13d0b6 100644
 +            }
 +        }
 +    }
++    // Observable telemetry (both normal & attack, every response): the present
++    // current ACTUALLY reported to the EV after any A1 forgery. The collector reads
++    // ISO present from this single consistent source, so normal and attack share the
++    // same cadence/count and differ only in value -- no injection/count trace.
++    dlog(DLOG_LEVEL_INFO, "[A1-REPORT] iso_present_current=%d mult=%d",
++         (int)res->EVSEPresentCurrent.Value, (int)res->EVSEPresentCurrent.Multiplier);
      if ((conn->ctx->evse_v2g_data.evse_maximum_voltage_limit_is_used == 1) &&
          (calc_physical_value(req->EVTargetVoltage.Value, req->EVTargetVoltage.Multiplier) >=
           calc_physical_value(conn->ctx->evse_v2g_data.evse_maximum_voltage_limit.Value,
-@@ -2266,6 +2336,17 @@ static enum v2g_event handle_iso_current_demand(struct v2g_connection* conn) {
+@@ -2266,6 +2344,17 @@ static enum v2g_event handle_iso_current_demand(struct v2g_connection* conn) {
          res->MeterInfo.MeterID.charactersLen = conn->ctx->meter_info.meter_id.bytesLen;
          memcpy(res->MeterInfo.MeterID.characters, conn->ctx->meter_info.meter_id.bytes, iso2_MeterID_CHARACTER_SIZE);
          res->MeterInfo.MeterReading = conn->ctx->meter_info.meter_reading;

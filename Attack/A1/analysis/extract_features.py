@@ -43,6 +43,12 @@ NUM = r"-?\d+(?:\.\d+)?"
 SPOOF_RE = re.compile(r"\[A1-ATTACK\] ISO (present_current|present_voltage): "
                       rf"({NUM}) -> ({NUM})(?:[^)]*?mult=(-?\d+))?")
 
+# [A1-REPORT] iso_present_current=<value> mult=<m> : emitted UNCONDITIONALLY on every
+# CurrentDemandRes (both normal and attack), carrying the present current actually
+# reported to the EV (forged under attack). This is the single, symmetric observation
+# source for ISO present current -> no source-asymmetry / message-count confound.
+REPORT_RE = re.compile(r"\[A1-REPORT\] iso_present_current=(" + NUM + r") mult=(-?\d+)")
+
 
 def _stats(xs):
     xs = [float(x) for x in xs if x is not None]
@@ -81,18 +87,18 @@ def _emitted(after, mult):
 
 
 def parse_iso(mqtt_text, manager_text):
-    # Prefer the SPOOFED value the EV actually receives (the '-> Y' emitted value),
-    # scaled by the ISO 15118 multiplier so it is comparable to OCPP amps. On normal
-    # sessions there are no A1-ATTACK lines, so we fall back to the (truthful)
-    # EVSEPresentCurrent published on the iso15118 topic.
-    cur = [_emitted(a, mult) for (w, _b, a, mult)
-           in (m.groups() for m in SPOOF_RE.finditer(manager_text)) if w == "present_current"]
-    volt = [_emitted(a, mult) for (w, _b, a, mult)
-            in (m.groups() for m in SPOOF_RE.finditer(manager_text)) if w == "present_voltage"]
+    # ISO present CURRENT: read from the unconditional [A1-REPORT] telemetry, which the
+    # SECC emits on EVERY CurrentDemandRes for both normal and attack sessions and which
+    # carries the value ACTUALLY reported to the EV (forged under attack). Reading both
+    # classes from this one source keeps the cadence/count identical and only the value
+    # differs -> the ISO<->OCPP gap is the sole attack signal (no source/count leakage).
+    # Legacy captures without [A1-REPORT] fall back to the mqtt-bus present current.
+    cur = [float(v) * (10 ** int(m)) for (v, m) in REPORT_RE.findall(manager_text)]
     if not cur:
         cur = _find_numbers_for_keys(mqtt_text, ISO_CUR_KEYS)
-    if not volt:
-        volt = _find_numbers_for_keys(mqtt_text, ISO_VOLT_KEYS)
+    # ISO present VOLTAGE: genuine in both classes (the current-under-report attack does
+    # not forge it), so the mqtt bus value is a symmetric source for normal and attack.
+    volt = _find_numbers_for_keys(mqtt_text, ISO_VOLT_KEYS)
     return cur, volt
 
 
