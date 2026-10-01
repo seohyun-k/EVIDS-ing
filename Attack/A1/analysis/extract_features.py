@@ -48,6 +48,9 @@ SPOOF_RE = re.compile(r"\[A1-ATTACK\] ISO (present_current|present_voltage): "
 # reported to the EV (forged under attack). This is the single, symmetric observation
 # source for ISO present current -> no source-asymmetry / message-count confound.
 REPORT_RE = re.compile(r"\[A1-REPORT\] iso_present_current=(" + NUM + r") mult=(-?\d+)")
+# Present VOLTAGE reported to the EV, in the same [A1-REPORT] line (forged under the
+# power-preserving I-V redistribution attack; genuine otherwise). Same symmetric source.
+REPORT_V_RE = re.compile(r"iso_present_voltage=(" + NUM + r") vmult=(-?\d+)")
 
 
 def _stats(xs):
@@ -96,9 +99,11 @@ def parse_iso(mqtt_text, manager_text):
     cur = [float(v) * (10 ** int(m)) for (v, m) in REPORT_RE.findall(manager_text)]
     if not cur:
         cur = _find_numbers_for_keys(mqtt_text, ISO_CUR_KEYS)
-    # ISO present VOLTAGE: genuine in both classes (the current-under-report attack does
-    # not forge it), so the mqtt bus value is a symmetric source for normal and attack.
-    volt = _find_numbers_for_keys(mqtt_text, ISO_VOLT_KEYS)
+    # ISO present VOLTAGE: from the same [A1-REPORT] line when present (forged under the
+    # power-preserving attack), else the mqtt bus (genuine). Symmetric source either way.
+    volt = [float(v) * (10 ** int(m)) for (v, m) in REPORT_V_RE.findall(manager_text)]
+    if not volt:
+        volt = _find_numbers_for_keys(mqtt_text, ISO_VOLT_KEYS)
     return cur, volt
 
 
