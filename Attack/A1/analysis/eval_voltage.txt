@@ -1,0 +1,52 @@
+
+=== A1 scope comparison (all sessions)  (n=31, pos=15, neg=16) ===
+scope       model     Prec  Recall     F1  AUROC  #feat
+ISO-only    LogReg   1.000   0.822  0.901  0.985  12
+ISO-only    RF       1.000   1.000  1.000  1.000  12
+OCPP-only   LogReg   0.483   0.511  0.494  0.465  12
+OCPP-only   RF       0.560   0.444  0.492  0.535  12
+concat      LogReg   1.000   0.822  0.901  0.978  24
+concat      RF       1.000   1.000  1.000  1.000  24
+cross       LogReg   1.000   0.889  0.941  1.000  36
+cross       RF       1.000   1.000  1.000  1.000  36
+count-only  LogReg   0.405   0.422  0.410  0.362  5
+count-only  RF       0.376   0.378  0.375  0.309  5
+
+=== A1 scope comparison (normal + attack@factor=0.75)  (n=21, pos=5, neg=16) ===
+scope       model     Prec  Recall     F1  AUROC  #feat
+ISO-only    LogReg   1.000   1.000  1.000  1.000  12
+ISO-only    RF       1.000   1.000  1.000  1.000  12
+OCPP-only   LogReg   0.112   0.200  0.143  0.335  12
+OCPP-only   RF       0.000   0.000  0.000  0.267  12
+concat      LogReg   1.000   1.000  1.000  1.000  24
+concat      RF       1.000   1.000  1.000  1.000  24
+cross       LogReg   1.000   1.000  1.000  1.000  36
+cross       RF       1.000   1.000  1.000  1.000  36
+count-only  LogReg   0.166   0.467  0.244  0.340  5
+count-only  RF       0.239   0.467  0.315  0.442  5
+
+=== A1 scope comparison (normal + attack@factor=0.8)  (n=21, pos=5, neg=16) ===
+scope       model     Prec  Recall     F1  AUROC  #feat
+ISO-only    LogReg   1.000   1.000  1.000  1.000  12
+ISO-only    RF       1.000   1.000  1.000  1.000  12
+OCPP-only   LogReg   0.336   0.600  0.430  0.575  12
+OCPP-only   RF       0.567   0.600  0.582  0.552  12
+concat      LogReg   1.000   1.000  1.000  1.000  24
+concat      RF       0.944   1.000  0.970  1.000  24
+cross       LogReg   1.000   1.000  1.000  1.000  36
+cross       RF       1.000   1.000  1.000  1.000  36
+count-only  LogReg   0.102   0.200  0.134  0.356  5
+count-only  RF       0.000   0.000  0.000  0.269  5
+
+=== A1 scope comparison (normal + attack@factor=0.9)  (n=21, pos=5, neg=16) ===
+scope       model     Prec  Recall     F1  AUROC  #feat
+ISO-only    LogReg   1.000   0.933  0.963  1.000  12
+ISO-only    RF       1.000   1.000  1.000  1.000  12
+OCPP-only   LogReg   0.209   0.400  0.274  0.392  12
+OCPP-only   RF       0.000   0.000  0.000  0.252  12
+concat      LogReg   1.000   0.867  0.926  1.000  24
+concat      RF       1.000   1.000  1.000  1.000  24
+cross       LogReg   1.000   1.000  1.000  1.000  36
+cross       RF       1.000   1.000  1.000  1.000  36
+count-only  LogReg   0.103   0.133  0.116  0.396  5
+count-only  RF       0.333   0.600  0.429  0.585  5
