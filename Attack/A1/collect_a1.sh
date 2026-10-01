@@ -69,6 +69,11 @@ SETPOINT_MAX="${SETPOINT_MAX:-32}"
 NORMAL_DERATE_FRAC="${NORMAL_DERATE_FRAC:-0.5}"   # share of normal sessions that derate
 DERATE_MIN="${DERATE_MIN:-0.55}"                  # supply cap as fraction of target current
 DERATE_MAX="${DERATE_MAX:-0.90}"
+# Attack sessions draw derating from the SAME process as normal (default = same
+# fraction) so normal and attack share one real-current distribution and differ
+# only by the ISO forgery. Set ATTACK_DERATE_FRAC=0 to reproduce the earlier
+# "attack always full" variant (which is just a biased subset of this superset).
+ATTACK_DERATE_FRAC="${ATTACK_DERATE_FRAC:-$NORMAL_DERATE_FRAC}"
 
 # ---- locate build/dist and csms ----
 autodetect() { for c in "$@"; do [ -e "$c" ] && { echo "$c"; return 0; }; done; return 1; }
@@ -274,8 +279,15 @@ done
 # attack sessions per factor
 for f in $FACTORS; do
   for i in $(seq 1 "$N_ATTACK"); do
-    printf -v sid "session_%04d_attack_f%s" "$idx" "${f/./p}"
-    run_one "$RUNDIR/$sid" 1 "$f"
+    roll=$(python3 -c "import random;print(1 if random.random() < $ATTACK_DERATE_FRAC else 0)")
+    if [ "$roll" = "1" ]; then
+      frac=$(rand_range "$DERATE_MIN" "$DERATE_MAX")
+      printf -v sid "session_%04d_attack_f%s_derate" "$idx" "${f/./p}"
+      run_one "$RUNDIR/$sid" 1 "$f" "$frac"
+    else
+      printf -v sid "session_%04d_attack_f%s" "$idx" "${f/./p}"
+      run_one "$RUNDIR/$sid" 1 "$f"
+    fi
     idx=$((idx+1))
   done
 done
