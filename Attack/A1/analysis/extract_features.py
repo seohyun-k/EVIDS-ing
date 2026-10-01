@@ -32,7 +32,8 @@ import argparse, json, os, re, sys, glob, math
 
 ISO_CUR_KEYS = ("EVSEPresentCurrent", "evse_present_current", "present_current")
 ISO_VOLT_KEYS = ("EVSEPresentVoltage", "evse_present_voltage", "present_voltage")
-OCPP_MEASURANDS = {"current": ("Current.Import", "Current"), "voltage": ("Voltage",)}
+OCPP_MEASURANDS = {"current": ("Current.Import", "Current"), "voltage": ("Voltage",),
+                   "energy": ("Energy.Active.Import.Register", "Energy.Active.Import")}
 
 NUM = r"-?\d+(?:\.\d+)?"
 # Matches the actual SECC spoof log line, e.g.
@@ -51,6 +52,8 @@ REPORT_RE = re.compile(r"\[A1-REPORT\] iso_present_current=(" + NUM + r") mult=(
 # Present VOLTAGE reported to the EV, in the same [A1-REPORT] line (forged under the
 # power-preserving I-V redistribution attack; genuine otherwise). Same symmetric source.
 REPORT_V_RE = re.compile(r"iso_present_voltage=(" + NUM + r") vmult=(-?\d+)")
+# Cumulative ISO meter reading (Wh) reported to the EV, forged under A1_TARGET=energy.
+REPORT_E_RE = re.compile(r"iso_meter_reading=(\d+)")
 
 
 def _stats(xs):
@@ -120,7 +123,8 @@ def parse_ocpp(csms_text):
         return out
     cur = by_measurand(OCPP_MEASURANDS["current"])
     volt = by_measurand(OCPP_MEASURANDS["voltage"])
-    return cur, volt
+    energy = by_measurand(OCPP_MEASURANDS["energy"])
+    return cur, volt, energy
 
 
 def parse_powermeter(mqtt_text):
@@ -169,7 +173,7 @@ def features_for_session(sdir):
     mgr = _read(os.path.join(sdir, "manager.log"))
 
     iso_cur, iso_volt = parse_iso(mqtt, mgr)
-    ocpp_cur, ocpp_volt = parse_ocpp(csms)
+    ocpp_cur, ocpp_volt, ocpp_energy = parse_ocpp(csms)
     pm_cur, pm_volt = parse_powermeter(mqtt)
     # OCPP is the trusted metered channel; fall back to powermeter if OCPP empty
     ref_cur = ocpp_cur or pm_cur
@@ -193,6 +197,14 @@ def features_for_session(sdir):
     cc_v = cross_consistency(iso_volt, ref_volt, tol_pct=2.0)  # RV03
     for k, v in cc_v.items():
         row[f"cross_rv03_{k}"] = v
+    # cross-only ENERGY correspondence: ISO cumulative meter reading vs OCPP
+    # Energy.Active.Import.Register. Under A1_TARGET=energy the ISO reading is
+    # scaled while present current/voltage stay truthful, so this is the sole
+    # signal (single channels see only the truthful current/voltage).
+    iso_energy = [float(v) for v in REPORT_E_RE.findall(mgr)]
+    cc_e = cross_consistency(iso_energy, ocpp_energy, tol_pct=2.0)
+    for k, v in cc_e.items():
+        row[f"cross_rvE_{k}"] = v
 
     # count-only ablation features (structural message volume)
     row["cnt_iso_current"] = len(iso_cur)

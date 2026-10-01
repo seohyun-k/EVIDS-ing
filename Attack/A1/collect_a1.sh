@@ -74,6 +74,13 @@ DERATE_MAX="${DERATE_MAX:-0.90}"
 # only by the ISO forgery. Set ATTACK_DERATE_FRAC=0 to reproduce the earlier
 # "attack always full" variant (which is just a biased subset of this superset).
 ATTACK_DERATE_FRAC="${ATTACK_DERATE_FRAC:-$NORMAL_DERATE_FRAC}"
+# Legitimate VOLTAGE derating (supply voltage-limited: present_voltage < target),
+# the exact dual of current derating via DCSupplySimulator max_voltage. Gives the
+# power-preserving attack (A1_TARGET=power_preserving) headroom to inflate the
+# reported voltage back toward target while dropping current (power unchanged).
+VOLT_DERATE_FRAC="${VOLT_DERATE_FRAC:-0}"          # share of sessions voltage-derated
+VDERATE_MIN="${VDERATE_MIN:-0.80}"                 # supply voltage cap as fraction of target
+VDERATE_MAX="${VDERATE_MAX:-0.92}"
 
 # ---- locate build/dist and csms ----
 autodetect() { for c in "$@"; do [ -e "$c" ] && { echo "$c"; return 0; }; done; return 1; }
@@ -136,7 +143,7 @@ ETC_EVEREST="$A1_DIST/etc/everest"
 # supply's max_current (config_implementation.main.max_current on powersupply_dc)
 # so the charger legitimately delivers less than the EV target (derating).
 make_session_config() {
-  local sid="$1" cur="$2" volt="$3" cap="${4:-}"
+  local sid="$1" cur="$2" volt="$3" cap="${4:-}" vcap="${5:-}"
   if [ "$VARY_SETPOINT" != "1" ] || [ -z "${BASE_CFG_FILE:-}" ] || [ ! -w "$ETC_EVEREST" ]; then
     [ "$VARY_SETPOINT" = "1" ] && [ -z "${_warned_setpoint:-}" ] && {
       echo "[collect] WARN: VARY_SETPOINT=1 but base config or $ETC_EVEREST not writable;" >&2
@@ -147,12 +154,13 @@ make_session_config() {
   local name="config-a1-$sid"
   sed -E "s/^([[:space:]]*dc_target_current:).*/\1 $cur/; s/^([[:space:]]*dc_target_voltage:).*/\1 $volt/; s/^([[:space:]]*device:)[[:space:]]*auto[[:space:]]*$/\1 $IFACE/" \
       "$BASE_CFG_FILE" \
-  | awk -v cap="$cap" '
+  | awk -v cap="$cap" -v vcap="$vcap" '
       { print }
-      /^[[:space:]]*module:[[:space:]]*DCSupplySimulator[[:space:]]*$/ && cap != "" {
+      /^[[:space:]]*module:[[:space:]]*DCSupplySimulator[[:space:]]*$/ && (cap != "" || vcap != "") {
         print "    config_implementation:"
         print "      main:"
-        print "        max_current: " cap
+        if (cap  != "") print "        max_current: " cap
+        if (vcap != "") print "        max_voltage: " vcap
       }' > "$ETC_EVEREST/$name.yaml"
   echo "$name"
 }
@@ -195,7 +203,14 @@ run_one() {
     supply_cap=$(python3 -c "import sys;print(round(float(sys.argv[1])*float(sys.argv[2]),1))" "$tgt_cur" "$derate_frac")
     derate=1
   fi
-  sess_cfg=$(make_session_config "$(basename "$sdir")" "$tgt_cur" "$tgt_volt" "$supply_cap")
+  # legitimate VOLTAGE derating (supply voltage-limited), dual of current derating
+  local volt_cap="" vderate=0
+  if [ "$(python3 -c "import random;print(1 if random.random() < ${VOLT_DERATE_FRAC:-0} else 0)")" = "1" ]; then
+    local vf; vf=$(rand_range "$VDERATE_MIN" "$VDERATE_MAX")
+    volt_cap=$(python3 -c "import sys;print(round(float(sys.argv[1])*float(sys.argv[2]),1))" "$tgt_volt" "$vf")
+    vderate=1
+  fi
+  sess_cfg=$(make_session_config "$(basename "$sdir")" "$tgt_cur" "$tgt_volt" "$supply_cap" "$volt_cap")
 
   local start_epoch; start_epoch=$(date +%s)
   # ground-truth injection log — the ONLY source of labels
@@ -210,7 +225,9 @@ run_one() {
   "dc_target_current": $tgt_cur,
   "dc_target_voltage": $tgt_volt,
   "derate_normal": $derate,
+  "volt_derate": $vderate,
   "supply_max_current": $( [ -n "$supply_cap" ] && echo "$supply_cap" || echo "null" ),
+  "supply_max_voltage": $( [ -n "$volt_cap" ] && echo "$volt_cap" || echo "null" ),
   "start_epoch": $start_epoch,
   "note": "label from injection plan, not from any detector"
 }

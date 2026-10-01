@@ -1,5 +1,5 @@
 diff --git a/modules/EVSE/EvseV2G/iso_server.cpp b/modules/EVSE/EvseV2G/iso_server.cpp
-index 41397f9..a3c83da 100644
+index 41397f9..9eeeafb 100644
 --- a/modules/EVSE/EvseV2G/iso_server.cpp
 +++ b/modules/EVSE/EvseV2G/iso_server.cpp
 @@ -2204,6 +2204,63 @@ static enum v2g_event handle_iso_pre_charge(struct v2g_connection* conn) {
@@ -112,7 +112,7 @@ index 41397f9..a3c83da 100644
      if ((conn->ctx->evse_v2g_data.evse_maximum_voltage_limit_is_used == 1) &&
          (calc_physical_value(req->EVTargetVoltage.Value, req->EVTargetVoltage.Multiplier) >=
           calc_physical_value(conn->ctx->evse_v2g_data.evse_maximum_voltage_limit.Value,
-@@ -2266,6 +2362,18 @@ static enum v2g_event handle_iso_current_demand(struct v2g_connection* conn) {
+@@ -2266,6 +2362,24 @@ static enum v2g_event handle_iso_current_demand(struct v2g_connection* conn) {
          res->MeterInfo.MeterID.charactersLen = conn->ctx->meter_info.meter_id.bytesLen;
          memcpy(res->MeterInfo.MeterID.characters, conn->ctx->meter_info.meter_id.bytes, iso2_MeterID_CHARACTER_SIZE);
          res->MeterInfo.MeterReading = conn->ctx->meter_info.meter_reading;
@@ -128,6 +128,12 @@ index 41397f9..a3c83da 100644
 +                res->MeterInfo.MeterReading = (uint64_t)a1_nv;
 +            }
 +        }
++        // Observable energy telemetry (both normal & attack, every metered response):
++        // the cumulative meter reading ACTUALLY reported to the EV (forged under
++        // A1_TARGET=energy). Lets the collector compare ISO energy against the OCPP
++        // Energy.Active.Import.Register -- divergence is the sole, cross-only signal.
++        dlog(DLOG_LEVEL_INFO, "[A1-REPORT] iso_meter_reading=%llu",
++             (unsigned long long)res->MeterInfo.MeterReading);
          res->MeterInfo.MeterReading_isUsed = 1;
          res->MeterInfo_isUsed = 1;
          // Reset the signal for the next time handle_set_MeterInfo is signaled
