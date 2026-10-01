@@ -1,0 +1,35 @@
+=== A) MATCHED (normal 20 + attack 21, matched derate distribution) ===
+
+=== A1 scope comparison (all sessions)  (n=41, pos=21, neg=20) ===
+scope       model     Prec  Recall     F1  AUROC  #feat
+ISO-only    LogReg   0.586   0.540  0.562  0.602  10
+ISO-only    RF       0.443   0.413  0.427  0.450  10
+ISO-only    XGB      0.493   0.508  0.500  0.513  10
+OCPP-only   LogReg   0.393   0.365  0.377  0.359  10
+OCPP-only   RF       0.368   0.349  0.358  0.335  10
+OCPP-only   XGB      0.423   0.492  0.455  0.346  10
+concat      LogReg   0.880   0.810  0.843  0.933  20
+concat      RF       0.677   0.698  0.687  0.696  20
+concat      XGB      0.749   0.746  0.746  0.765  20
+cross       LogReg   1.000   1.000  1.000  1.000  26
+cross       RF       1.000   1.000  1.000  1.000  26
+cross       XGB      0.941   1.000  0.969  0.967  26
+count-only  (no features)
+
+=== B) FULL-ONLY (normal 20 + attack-full 10, biased subset) ===
+
+=== A1 scope comparison (all sessions)  (n=30, pos=10, neg=20) ===
+scope       model     Prec  Recall     F1  AUROC  #feat
+ISO-only    LogReg   0.389   0.567  0.460  0.550  10
+ISO-only    RF       0.125   0.100  0.111  0.392  10
+ISO-only    XGB      0.154   0.133  0.142  0.309  10
+OCPP-only   LogReg   0.330   0.467  0.386  0.430  10
+OCPP-only   RF       0.149   0.200  0.170  0.283  10
+OCPP-only   XGB      0.260   0.300  0.278  0.331  10
+concat      LogReg   0.843   0.700  0.764  0.913  20
+concat      RF       0.312   0.333  0.322  0.482  20
+concat      XGB      0.361   0.267  0.304  0.550  20
+cross       LogReg   0.909   1.000  0.952  0.950  26
+cross       RF       1.000   0.967  0.982  1.000  26
+cross       XGB      0.884   1.000  0.938  0.967  26
+count-only  (no features)
