@@ -114,12 +114,16 @@ def parse_ocpp(csms_text):
     """OCPP MeterValues sampledValue by measurand. Handles the common shape
     {"value":"X","measurand":"Current.Import",...} in either key order."""
     def by_measurand(names):
+        # Each sampledValue is {... "measurand":"X", "unitOfMeasure":{...}, "value":V ...};
+        # the nested unitOfMeasure object means we must use .*? (not [^}]) to reach the
+        # value that follows the measurand within the same entry.
         out = []
         for nm in names:
             out += [float(x) for x in re.findall(
-                rf'"value"\s*:\s*"?({NUM})"?[^}}]*?"measurand"\s*:\s*"{re.escape(nm)}"', csms_text)]
-            out += [float(x) for x in re.findall(
-                rf'"measurand"\s*:\s*"{re.escape(nm)}"[^}}]*?"value"\s*:\s*"?({NUM})"?', csms_text)]
+                rf'"measurand"\s*:\s*"{re.escape(nm)}".*?"value"\s*:\s*"?({NUM})"?', csms_text)]
+            if not out:  # fallback: value-before-measurand layouts
+                out += [float(x) for x in re.findall(
+                    rf'"value"\s*:\s*"?({NUM})"?[^{{}}]*?"measurand"\s*:\s*"{re.escape(nm)}"', csms_text)]
         return out
     cur = by_measurand(OCPP_MEASURANDS["current"])
     volt = by_measurand(OCPP_MEASURANDS["voltage"])
@@ -166,6 +170,21 @@ def cross_consistency(iso_vals, ocpp_vals, tol_pct):
                 ratio_mean=sum(ratios) / n, n_checks=n)
 
 
+def cross_energy(iso_e, ocpp_e, tol_pct):
+    """Energy is CUMULATIVE (monotonic), so index pairing is invalid; compare the
+    final/peak accumulated values (and their ratio). Under A1_TARGET=energy the ISO
+    reading is scaled by k, so the ratio ~= k on attack and ~= 1 on normal."""
+    a = [v for v in iso_e if v > 0]
+    b = [v for v in ocpp_e if v > 0]
+    if not a or not b:
+        return dict(ratio=1.0, diff_pct=0.0, violation=0, n_checks=0)
+    ri, ro = max(a), max(b)
+    ratio = ri / ro if ro else 1.0
+    pct = (ratio - 1.0) * 100.0
+    return dict(ratio=ratio, diff_pct=pct, violation=1 if abs(pct) > tol_pct else 0,
+                n_checks=min(len(a), len(b)))
+
+
 def features_for_session(sdir):
     meta = json.load(open(os.path.join(sdir, "meta.json")))
     mqtt = _read(os.path.join(sdir, "mqtt.log"))
@@ -202,7 +221,7 @@ def features_for_session(sdir):
     # scaled while present current/voltage stay truthful, so this is the sole
     # signal (single channels see only the truthful current/voltage).
     iso_energy = [float(v) for v in REPORT_E_RE.findall(mgr)]
-    cc_e = cross_consistency(iso_energy, ocpp_energy, tol_pct=2.0)
+    cc_e = cross_energy(iso_energy, ocpp_energy, tol_pct=2.0)
     for k, v in cc_e.items():
         row[f"cross_rvE_{k}"] = v
 
