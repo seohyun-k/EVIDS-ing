@@ -45,6 +45,25 @@ precharge caps `present_voltage` at the battery voltage with no headroom, so the
 voltage leg cannot move up (confirmed 3 ways incl. SDPFailedError when max_voltage
 is capped).
 
+**SoC** (`DC_EVStatus.EVRESSSOC` → OCPP `SoC` measurand) is likewise *not*
+cross-only, for two independent reasons verified in the logs: (1) it is
+**single-sourced** — the value originates at the EV and is relayed to both
+channels identically (ISO `dc_ev_ress_soc=30.0`, OCPP `measurand:SoC value=30.0`),
+so a SECC-side forgery moves both channels together and cross sees no divergence;
+and (2) it is **constant** in the SIL (30.0 throughout), so even a single-channel
+forgery would be a flat-constant anomaly like voltage. SoC fails condition (a)
+*and* (b), same as voltage.
+
+## Completeness
+
+This exhausts the ISO-forgeable DC telemetry quantities: current, voltage, energy,
+power, SoC. Only the two that are **both variable (overlapping) and
+independently sourced on the two channels** — `present_current`
+(EVSE-reported-to-EV vs power-module-measured) and cumulative `MeterReading`
+(EVSE meter vs power-module-integrated) — are cross-only. Voltage and SoC are
+pinned/single-sourced constants (single-channel detectable), and power reduces to
+current (V pinned). So the characterization is complete, not a sample.
+
 ## Measured evidence (voltage run)
 
 ```
