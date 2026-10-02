@@ -11,12 +11,14 @@ normal/attack, StratifiedKFold K=5×3 seeds, `[A1-REPORT]` symmetric telemetry.
 | Attack (ISO forgery)            | ISO-only | OCPP-only | cross | Verdict                       |
 |---------------------------------|:--------:|:---------:|:-----:|-------------------------------|
 | **present_current** under-report|   low    |   low     | **1.00** | **cross-only** ✓            |
-| **cumulative-energy** under-rep.|  ~0.62   |  ~0.74    | **0.96** | **cross-only** ✓ (billing)  |
+| **cumulative-energy** under-rep.|  ~0.43   |  ~0.41    | **0.95–1.00** | **cross-only** ✓ (billing, n=43) |
 | **present_voltage** under-report| **1.00** |  ~0.50    | 1.00  | single-channel (ISO) — boundary |
 | **power-preserving** I↕V        |    —     |    —      |   —   | physically impossible (precharge) |
 
 (voltage: n=31, 16 normal / 15 attack; ISO-only RF Prec/Rec/F1/AUROC = 1.00 across
-every factor 0.75/0.80/0.90; OCPP-only ≈ random 0.25–0.58.)
+every factor 0.75/0.80/0.90; OCPP-only ≈ random 0.25–0.58. energy: n=43, 22/21;
+cross LogReg AUROC 0.947 / RF 1.00, single channels all ~random — the linear model
+also solving it rules out small-n tree overfit.)
 
 ## Why — the cross-necessity condition
 
