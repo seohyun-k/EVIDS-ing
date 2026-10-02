@@ -1,0 +1,13 @@
+
+=== A1 scope comparison (all sessions)  (n=43, pos=21, neg=22) ===
+scope       model     Prec  Recall     F1  AUROC  #feat
+ISO-only    LogReg   0.447   0.302  0.359  0.436  12
+ISO-only    RF       0.462   0.460  0.460  0.434  12
+OCPP-only   LogReg   0.398   0.286  0.331  0.413  12
+OCPP-only   RF       0.351   0.333  0.342  0.323  12
+concat      LogReg   0.444   0.333  0.380  0.411  24
+concat      RF       0.414   0.413  0.413  0.356  24
+cross       LogReg   1.000   0.905  0.949  0.947  36
+cross       RF       1.000   1.000  1.000  1.000  36
+count-only  LogReg   0.056   0.016  0.025  0.311  5
+count-only  RF       0.569   0.603  0.585  0.466  5

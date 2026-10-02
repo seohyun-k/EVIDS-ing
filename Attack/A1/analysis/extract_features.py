@@ -170,15 +170,28 @@ def cross_consistency(iso_vals, ocpp_vals, tol_pct):
                 ratio_mean=sum(ratios) / n, n_checks=n)
 
 
+def _robust_peak(xs):
+    """Near-final value of a cumulative series, robust to a lone transition-glitch
+    outlier. The EVSE meter occasionally emits one spurious huge reading at a
+    session boundary (e.g. 12026 in a session that otherwise climbs 1..302); plain
+    max() latches onto it and blows the ratio up ~40x on normals. The 95th
+    percentile keeps the true end-of-session accumulation while rejecting that
+    single spike."""
+    s = sorted(xs)
+    return s[min(len(s) - 1, int(0.95 * len(s)))]
+
+
 def cross_energy(iso_e, ocpp_e, tol_pct):
     """Energy is CUMULATIVE (monotonic), so index pairing is invalid; compare the
-    final/peak accumulated values (and their ratio). Under A1_TARGET=energy the ISO
-    reading is scaled by k, so the ratio ~= k on attack and ~= 1 on normal."""
+    robust near-final accumulated values (and their ratio). Under A1_TARGET=energy
+    the ISO reading is scaled by k, so the ratio ~= k on attack and ~= 1 on normal.
+    Uses a robust peak (not max) because the EVSE meter emits occasional lone
+    session-boundary spikes that would otherwise corrupt normal sessions."""
     a = [v for v in iso_e if v > 0]
     b = [v for v in ocpp_e if v > 0]
     if not a or not b:
         return dict(ratio=1.0, diff_pct=0.0, violation=0, n_checks=0)
-    ri, ro = max(a), max(b)
+    ri, ro = _robust_peak(a), _robust_peak(b)
     ratio = ri / ro if ro else 1.0
     pct = (ratio - 1.0) * 100.0
     return dict(ratio=ratio, diff_pct=pct, violation=1 if abs(pct) > tol_pct else 0,
