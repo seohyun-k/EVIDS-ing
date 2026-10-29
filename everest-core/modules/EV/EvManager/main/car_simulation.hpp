@@ -5,6 +5,8 @@
 
 #include "simulation_data.hpp"
 
+#include <array>
+
 #include "../EvManager.hpp"
 #include <generated/interfaces/ISO15118_ev/Interface.hpp>
 #include <generated/interfaces/ev_board_support/Interface.hpp>
@@ -133,6 +135,22 @@ private:
     double charge_current_a{0};
 
     double latest_soc{0};
+
+    // --- Zenodo real-trace replay (driven by env EV_REPLAY_PROFILE / EV_REPLAY_DURATION_S).
+    // When active, the DC charging tick feeds real measured target V/I + SoC from a CSV
+    // (t_s,target_voltage_V,target_current_A,soc_pct) instead of the static config setpoint,
+    // re-issuing set_dc_params each tick so the real charging curve flows into both the
+    // ISO 15118 present values and the OCPP meter values. ---
+    bool replay_inited{false};
+    bool replay_active{false};
+    bool replay_started{false};
+    double replay_duration_s{0.0};
+    std::vector<std::array<double, 4>> replay_rows; // t_s, V, I, soc
+    std::chrono::time_point<std::chrono::steady_clock> replay_t0;
+    double replay_last_v{-1.0e9};
+    double replay_last_i{-1.0e9};
+    void replay_init();
+    bool replay_value(double& voltage, double& current, double& soc);
 
     enum class ChargeMode {
         None,

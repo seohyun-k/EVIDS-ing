@@ -6,7 +6,100 @@
 
 #include <everest/logging.hpp>
 
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+
 constexpr double MS_FACTOR = (1.0 / 60.0 / 60.0 / 1000.0);
+
+// Load a Zenodo-derived replay profile from EV_REPLAY_PROFILE (CSV columns:
+// t_s,target_voltage_V,target_current_A,soc_pct). EV_REPLAY_DURATION_S optionally
+// compresses the whole profile into that many seconds (0 = real time). Mirrors the
+// A1 attack's getenv pattern so no manifest/Conf changes are needed.
+void CarSimulation::replay_init() {
+    replay_inited = true;
+    const char* path = std::getenv("EV_REPLAY_PROFILE");
+    if (path == nullptr || path[0] == '\0') {
+        return;
+    }
+    std::ifstream f(path);
+    if (!f) {
+        EVLOG_warning << "[REPLAY] cannot open EV_REPLAY_PROFILE=" << path;
+        return;
+    }
+    std::string line;
+    std::getline(f, line); // header
+    while (std::getline(f, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        std::stringstream ss(line);
+        std::string cell;
+        std::array<double, 4> row{0, 0, 0, 0};
+        int j = 0;
+        while (std::getline(ss, cell, ',') && j < 4) {
+            try {
+                row[j] = std::stod(cell);
+            } catch (...) {
+                row[j] = 0.0;
+            }
+            j++;
+        }
+        if (j >= 4) {
+            replay_rows.push_back(row);
+        }
+    }
+    const char* dur = std::getenv("EV_REPLAY_DURATION_S");
+    replay_duration_s = (dur != nullptr && dur[0] != '\0') ? std::atof(dur) : 0.0;
+    replay_active = !replay_rows.empty();
+    EVLOG_info << "[REPLAY] loaded " << replay_rows.size() << " rows from " << path
+               << " duration_s=" << replay_duration_s << " active=" << replay_active;
+}
+
+// Linear-interpolated (target_voltage, target_current, soc) at the current replay
+// time. Elapsed wall time since the first DC tick is scaled so the full profile spans
+// replay_duration_s. Returns false when replay is not active.
+bool CarSimulation::replay_value(double& voltage, double& current, double& soc) {
+    if (!replay_active) {
+        return false;
+    }
+    if (!replay_started) {
+        replay_t0 = std::chrono::steady_clock::now();
+        replay_started = true;
+    }
+    const double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - replay_t0)
+                               .count() /
+                           1000.0;
+    const double prof_total = replay_rows.back()[0];
+    const double scale = (replay_duration_s > 0.0) ? (prof_total / replay_duration_s) : 1.0;
+    double tau = elapsed * scale;
+    if (tau < 0.0) {
+        tau = 0.0;
+    }
+    if (tau > prof_total) {
+        tau = prof_total;
+    }
+    size_t i = 0;
+    while (i + 1 < replay_rows.size() && replay_rows[i + 1][0] < tau) {
+        i++;
+    }
+    const auto& a = replay_rows[i];
+    if (i + 1 < replay_rows.size()) {
+        const auto& b = replay_rows[i + 1];
+        const double span = b[0] - a[0];
+        const double w = (span > 0.0) ? (tau - a[0]) / span : 0.0;
+        voltage = a[1] + (b[1] - a[1]) * w;
+        current = a[2] + (b[2] - a[2]) * w;
+        soc = a[3] + (b[3] - a[3]) * w;
+    } else {
+        voltage = a[1];
+        current = a[2];
+        soc = a[3];
+    }
+    return true;
+}
 
 void CarSimulation::state_machine() {
     using types::ev_board_support::EvCpState;
@@ -125,11 +218,44 @@ void CarSimulation::simulate_soc() {
         ev_info.target_current = charge_current_a;
         ev_info.target_voltage = 0;
         break;
-    case ChargeMode::DC:
+    case ChargeMode::DC: {
+        if (!replay_inited) {
+            replay_init();
+        }
+        double r_voltage = 0.0, r_current = 0.0, r_soc = 0.0;
+        if (replay_value(r_voltage, r_current, r_soc)) {
+            // Real-trace replay: the EV requests the measured curve, and set_dc_params is
+            // re-issued every tick so the updated target flows through ISO 15118 (present
+            // values) and the OCPP meter. SoC comes straight from the trace, so skip the
+            // internal battery integration below.
+            ev_info.target_current = r_current;
+            ev_info.target_voltage = r_voltage;
+            if (!r_ev.empty()) {
+                // Re-issue the target only when it moved (avoid spamming the EVCC every tick).
+                if (std::abs(r_voltage - replay_last_v) >= 0.5 || std::abs(r_current - replay_last_i) >= 0.5) {
+                    replay_last_v = r_voltage;
+                    replay_last_i = r_current;
+                    r_ev[0]->call_set_dc_params({static_cast<double>(config.dc_max_current_limit),
+                                                 static_cast<double>(config.dc_max_power_limit),
+                                                 static_cast<double>(config.dc_max_voltage_limit),
+                                                 static_cast<double>(config.dc_energy_capacity), r_current, r_voltage});
+                }
+                if (latest_soc != r_soc) {
+                    latest_soc = r_soc;
+                    r_ev[0]->call_update_soc(r_soc);
+                }
+            }
+            ev_info.soc = r_soc;
+            ev_info.battery_capacity = sim_data.battery_capacity_wh;
+            ev_info.battery_full_soc = 100;
+            p_ev_manager->publish_ev_info(ev_info);
+            return;
+        }
         power = config.dc_target_current * config.dc_target_voltage;
         ev_info.target_current = config.dc_target_current;
         ev_info.target_voltage = config.dc_target_voltage;
         break;
+    }
     }
 
     if (sim_data.battery_charge_wh > sim_data.battery_capacity_wh) {

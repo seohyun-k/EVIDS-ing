@@ -8,3 +8,6 @@ Attack/A1/Attack_data/run_*/
 # macOS
 .DS_Store
 **/.DS_Store
+
+# Zenodo replay (large intermediate)
+replay_data/out/

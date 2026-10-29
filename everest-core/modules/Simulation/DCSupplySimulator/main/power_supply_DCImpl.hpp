@@ -15,8 +15,11 @@
 
 // ev@75ac1216-19eb-4182-a85c-820f1fc2c091:v1
 // insert your custom include headers here
+#include <array>
+#include <chrono>
 #include <mutex>
 #include <utils/thread.hpp>
+#include <vector>
 // ev@75ac1216-19eb-4182-a85c-820f1fc2c091:v1
 
 namespace module {
@@ -72,6 +75,7 @@ private:
     double settings_connector_max_export_current{0.0};
     double settings_connector_max_import_current{0.0};
     types::power_supply_DC::Mode mode{types::power_supply_DC::Mode::Off};
+    types::power_supply_DC::ChargingPhase charging_phase{types::power_supply_DC::ChargingPhase::Other};
     double connector_voltage{0.0};
     double connector_current{0.0};
     double energy_import_total{0.0};
@@ -80,6 +84,18 @@ private:
     Everest::Thread power_supply_thread_handle;
     types::powermeter::Powermeter power_meter_external();
     void power_supply_worker(void);
+
+    // Zenodo real-trace replay (env EV_REPLAY_PROFILE / EV_REPLAY_DURATION_S). When active,
+    // the DC output V/I is overridden with a measured charging curve while exporting, so the
+    // same real values flow into both the ISO present values and the OCPP powermeter.
+    bool replay_inited{false};
+    bool replay_active{false};
+    bool replay_started{false};
+    double replay_duration_s{0.0};
+    std::vector<std::array<double, 4>> replay_rows; // t_s, V, I, soc
+    std::chrono::time_point<std::chrono::steady_clock> replay_t0;
+    void replay_init();
+    bool replay_value(double& voltage, double& current);
 
     static constexpr int LOOP_SLEEP_MS{500};
     void clampVoltageCurrent(double& voltage, double& current);

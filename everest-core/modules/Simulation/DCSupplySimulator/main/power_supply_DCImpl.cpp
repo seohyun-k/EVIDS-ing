@@ -3,12 +3,99 @@
 // Copyright Pionix GmbH and Contributors to EVerest
 
 #include <chrono>
+#include <cstdlib>
+#include <fstream>
 #include <mutex>
+#include <sstream>
 
 #include "power_supply_DCImpl.hpp"
 
 namespace module {
 namespace main {
+
+// Load a Zenodo-derived replay profile (CSV: t_s,target_voltage_V,target_current_A,soc_pct)
+// from EV_REPLAY_PROFILE. EV_REPLAY_DURATION_S compresses the whole profile into that many
+// seconds (0 = real time). Same getenv pattern as the A1 attack patch; no config changes.
+void power_supply_DCImpl::replay_init() {
+    replay_inited = true;
+    const char* path = std::getenv("EV_REPLAY_PROFILE");
+    if (path == nullptr || path[0] == '\0') {
+        return;
+    }
+    std::ifstream f(path);
+    if (!f) {
+        EVLOG_warning << "[REPLAY/supply] cannot open EV_REPLAY_PROFILE=" << path;
+        return;
+    }
+    std::string line;
+    std::getline(f, line); // header
+    while (std::getline(f, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        std::stringstream ss(line);
+        std::string cell;
+        std::array<double, 4> row{0, 0, 0, 0};
+        int j = 0;
+        while (std::getline(ss, cell, ',') && j < 4) {
+            try {
+                row[j] = std::stod(cell);
+            } catch (...) {
+                row[j] = 0.0;
+            }
+            j++;
+        }
+        if (j >= 4) {
+            replay_rows.push_back(row);
+        }
+    }
+    const char* dur = std::getenv("EV_REPLAY_DURATION_S");
+    replay_duration_s = (dur != nullptr && dur[0] != '\0') ? std::atof(dur) : 0.0;
+    replay_active = !replay_rows.empty();
+    EVLOG_info << "[REPLAY/supply] loaded " << replay_rows.size() << " rows from " << path
+               << " duration_s=" << replay_duration_s << " active=" << replay_active;
+}
+
+// Interpolated (voltage, current) at the current replay time; clock starts on the first
+// call (first export tick). Returns false when replay is inactive.
+bool power_supply_DCImpl::replay_value(double& voltage, double& current) {
+    if (!replay_active) {
+        return false;
+    }
+    if (!replay_started) {
+        replay_t0 = std::chrono::steady_clock::now();
+        replay_started = true;
+    }
+    const double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - replay_t0)
+                               .count() /
+                           1000.0;
+    const double prof_total = replay_rows.back()[0];
+    const double scale = (replay_duration_s > 0.0) ? (prof_total / replay_duration_s) : 1.0;
+    double tau = elapsed * scale;
+    if (tau < 0.0) {
+        tau = 0.0;
+    }
+    if (tau > prof_total) {
+        tau = prof_total;
+    }
+    size_t i = 0;
+    while (i + 1 < replay_rows.size() && replay_rows[i + 1][0] < tau) {
+        i++;
+    }
+    const auto& a = replay_rows[i];
+    if (i + 1 < replay_rows.size()) {
+        const auto& b = replay_rows[i + 1];
+        const double span = b[0] - a[0];
+        const double w = (span > 0.0) ? (tau - a[0]) / span : 0.0;
+        voltage = a[1] + (b[1] - a[1]) * w;
+        current = a[2] + (b[2] - a[2]) * w;
+    } else {
+        voltage = a[1];
+        current = a[2];
+    }
+    return true;
+}
 
 void power_supply_DCImpl::init() {
     connector_voltage = 0.0;
@@ -58,6 +145,7 @@ void power_supply_DCImpl::ready() {
 void power_supply_DCImpl::handle_setMode(types::power_supply_DC::Mode& _mode,
                                          types::power_supply_DC::ChargingPhase& phase) {
     mode = _mode;
+    charging_phase = phase; // only replay-override during the real Charging phase, not PreCharge
 
     EVLOG_info << "Set mode: " << types::power_supply_DC::mode_to_string(mode)
                << " ChargingPhase: " << types::power_supply_DC::charging_phase_to_string(phase);
@@ -154,6 +242,23 @@ void power_supply_DCImpl::power_supply_worker(void) {
         std::this_thread::sleep_for(std::chrono::milliseconds(LOOP_SLEEP_MS));
 
         std::scoped_lock access_lock(power_supply_values_mutex);
+
+        // Real-trace replay: while exporting (charging), override the simulated output with
+        // the measured Zenodo curve so both the ISO present values and the OCPP powermeter
+        // (derived from connector_voltage/current below) follow the real charging profile.
+        if (!replay_inited) {
+            replay_init();
+        }
+        if (replay_active && mode == types::power_supply_DC::Mode::Export &&
+            charging_phase == types::power_supply_DC::ChargingPhase::Charging) {
+            double r_voltage = 0.0, r_current = 0.0;
+            if (replay_value(r_voltage, r_current)) {
+                clampVoltageCurrent(r_voltage, r_current);
+                connector_voltage = r_voltage;
+                connector_current = r_current;
+            }
+        }
+
         voltage_current.voltage_V = static_cast<float>(connector_voltage);
         voltage_current.current_A = static_cast<float>(connector_current);
 
