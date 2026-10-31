@@ -11,3 +11,8 @@ Attack/A1/Attack_data/run_*/
 
 # Zenodo replay (large intermediate)
 replay_data/out/
+
+# real-data collection raw (large/intermediate)
+replay_data/dataset_rt/*/manager.log
+replay_data/dataset_rt/*/mqtt.log
+replay_data/ocpp_out/
